@@ -1,0 +1,67 @@
+{
+  "name": "saltapp-chat-adapter",
+  "version": "0.1.0",
+  "description": "Vercel Chat SDK platform adapter for Salt (saltapp.ai) -- write a bot once with `chat`, run it on Salt as one more platform.",
+  "license": "MIT",
+  "author": "0x0000F8 <0000F8@proton.me>",
+  "homepage": "https://saltapp.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0000F8/saltapp-chat-adapter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0000F8/saltapp-chat-adapter/issues"
+  },
+  "keywords": [
+    "chat",
+    "chat-sdk",
+    "chatbot",
+    "bot-framework",
+    "salt",
+    "saltapp",
+    "webhook",
+    "pgp",
+    "ai-agent",
+    "typescript"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@chat-adapter/shared": "^4.40.0",
+    "chat": "^4.40.0",
+    "salt-agent-sdk": "^0.7.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.5.0",
+    "vite": "^7.1.0",
+    "vitest": "^5.0.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

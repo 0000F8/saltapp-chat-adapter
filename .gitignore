@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tgz
+.env
+coverage/
+
+# salt-agent-sdk isn't published yet (see HANDOFF.md); a lockfile generated
+# against the local `file:../salt-agent-sdk` override during development
+# would be inconsistent with package.json's committed "^0.7.1" range.
+package-lock.json

@@ -1,0 +1,22 @@
+{
+  "name": "saltapp-chat-adapter-echo-bot-example",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Example bot: echoes messages on Salt and asks a yes/no question with card buttons, built with `chat` + saltapp-chat-adapter.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@chat-adapter/state-memory": "^4.40.0",
+    "chat": "^4.40.0",
+    "dotenv": "^16.4.5",
+    "saltapp-chat-adapter": "file:../.."
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
