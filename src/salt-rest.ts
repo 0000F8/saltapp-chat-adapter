@@ -15,10 +15,9 @@
 // (salt-agent-sdk 0.10 DOES now export a socket client of its own,
 // `createSocketClient` -- but it's built around a full IdentityStore +
 // decrypt/session/reply dispatcher for a native Salt agent process, not a
-// bridge into another framework's own Adapter interface, and its typed
-// MessageContext doesn't surface delivered_because; see socket.ts's header
-// comment for why this adapter holds its own Action Cable connection on
-// top of the raw endpoint instead of adopting that dispatcher wholesale.)
+// bridge into another framework's own Adapter interface; see socket.ts's
+// header comment for why this adapter holds its own Action Cable connection
+// on top of the raw endpoint instead of adopting that dispatcher wholesale.)
 
 import { SaltApiError, type SaltChat } from "salt-agent-sdk";
 

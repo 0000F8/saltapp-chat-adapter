@@ -16,12 +16,14 @@
 // a bridge into a different framework's own Adapter interface. Reusing it
 // would mean decrypting under a second, different session model than this
 // adapter's own lazy per-thread decrypt (adapter.ts's `decryptAndNormalize`,
-// chat-sdk's own contract), AND it would drop salt-api's `delivered_because`
-// on the floor -- it isn't in the SDK's typed `MessageContext` as of this
-// writing, and this adapter needs to read it straight off the raw envelope
-// body to honor task item 3 (expose it on the normalized Message). So this
-// file keeps its own translation layer, reusing exactly the pieces of
-// salt-agent-sdk that ARE transport-only and genuinely fit:
+// chat-sdk's own contract). salt-agent-sdk 0.10.1 did add
+// `MessageContext.deliveredBecause`, so a bot built directly on the SDK's
+// dispatcher can read it from `ctx` -- but this adapter never adopts that
+// dispatcher, so `delivered_because` still needs to be read straight off
+// the raw envelope body (adapter.ts's `decryptAndNormalize`, exposed on the
+// normalized Message's `raw`). So this file keeps its own translation
+// layer, reusing exactly the pieces of salt-agent-sdk that ARE
+// transport-only and genuinely fit:
 //   - `CursorStore`/`FileCursorStore`/`MemoryCursorStore` for cursor
 //     persistence (same file-per-agent-id shape createSocketClient itself
 //     uses internally).

@@ -199,15 +199,19 @@ the required version if an older copy is somehow resolved at runtime.
 Deliberately NOT reused from `salt-agent-sdk`: its own `createSocketClient`.
 That client is built around a full `IdentityStore` and a decrypt/session/
 hand-off dispatcher for a native Salt agent process (its `reply()`/`ask()`/
-`approve()` re-encrypt and post directly, and its typed `MessageContext`
-doesn't surface `delivered_because` as of salt-agent-sdk 0.10.0) -- this
-adapter already has its own translation layer into chat-sdk's
-`ChatInstance.processMessage`, which decrypts lazily per chat-sdk's own
-contract. Reusing the SDK's dispatcher would mean decrypting under a second,
-different session model AND losing `delivered_because` on the floor, so
-`socket.ts` instead holds its own Action Cable connection directly and
-reuses exactly the transport-only pieces of `salt-agent-sdk` that fit:
-`CursorStore`/`DedupeStore` and the reconnect/ping-timeout constants. See
+`approve()` re-encrypt and post directly) -- this adapter already has its
+own translation layer into chat-sdk's `ChatInstance.processMessage`, which
+decrypts lazily per chat-sdk's own contract, and reusing the SDK's
+dispatcher would mean decrypting under a second, different session model.
+salt-agent-sdk 0.10.1 did add `MessageContext.deliveredBecause` -- so a bot
+built directly on the SDK's own dispatcher can read it from `ctx` -- but
+that's moot for this adapter specifically because it never adopts that
+dispatcher in the first place; `delivered_because` reaches this adapter by
+reading the raw envelope itself instead (see `types.ts`'s
+`SaltRawMessage.delivered_because`). So `socket.ts` holds its own Action
+Cable connection directly and reuses exactly the transport-only pieces of
+`salt-agent-sdk` that fit: `CursorStore`/`DedupeStore` and the
+reconnect/ping-timeout constants. See
 `socket.ts`'s header comment for the full reasoning.
 
 ## Testing
