@@ -3,7 +3,7 @@
 // Adapter implementation.
 
 import type { Logger } from "chat";
-import type { CursorStore, DedupeStore, SaltClient } from "salt-agent-sdk";
+import type { CursorStore, DedupeStore, DeliveredBecause, SaltClient } from "salt-agent-sdk";
 import type { WebSocket as WS } from "ws";
 
 /**
@@ -36,10 +36,15 @@ export interface SaltRawMessage {
   encrypted?: boolean;
   /** Interests: why this open-room message was delivered to this identity
    *  (see SaltClient.setChatSubscription's `mode`). Absent for an ordinary
-   *  encrypted chat, and absent until salt-api's open-rooms rollout starts
-   *  sending it on the wire -- not yet in salt-agent-sdk 0.10.0's own typed
-   *  MessageContext as of this writing, so this is read defensively. */
-  delivered_because?: "mention" | "reply" | "keyword" | "all" | string;
+   *  encrypted chat. salt-agent-sdk 0.10.1 confirmed this field's wire
+   *  location/values via its own MessageContext.deliveredBecause -- typed
+   *  here as `DeliveredBecause` for the values this repo knows about, `|
+   *  string` besides (this field rides straight through on `raw`, chat-sdk's
+   *  documented "platform-specific raw payload" escape hatch, unvalidated,
+   *  unlike salt-agent-sdk's own MessageContext.deliveredBecause which
+   *  narrows an unrecognized value to undefined -- a future kind added
+   *  server-side is still visible here rather than silently dropped). */
+  delivered_because?: DeliveredBecause | string;
   message_id: string;
   seq?: number;
   message_type?: string;
