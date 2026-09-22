@@ -91,7 +91,8 @@ retired or compromised.
 
 - **Webhook handling**: verifies Salt's per-agent HMAC signature
   (`X-Salt-Signature`), decrypts the PGP ciphertext with the agent's own
-  key, and normalizes into a chat-sdk `Message`.
+  key (or passes an open room's plaintext straight through, no decrypt --
+  see **Open rooms** below), and normalizes into a chat-sdk `Message`.
 - **Group @mention gating**: Salt's own server never delivers a group-chat
   message webhook to an agent unless it was @mentioned
   (`Message#send_webhook`) -- this adapter trusts that gate and marks every
@@ -101,7 +102,8 @@ retired or compromised.
   channel -- Salt has no Slack-style nesting), or `salt:<chatId>:lane:<laneId>`
   for a private sidechain/advisor/consult lane.
 - **Posting text**: encrypted for every current chat member plus the
-  agent's own readable copy (`sender_message`).
+  agent's own readable copy (`sender_message`) -- or plain, for a chat this
+  adapter has observed as an open room (see **Open rooms**).
 - **Cards**: a chat-sdk `CardElement` maps onto Salt's declarative block
   vocabulary (`section` / `fields` / `image` / `divider` / `actions`+buttons,
   see `CARD_PROTOCOL_SPEC.md` and salt-api's `Card` model). Anything Salt's
@@ -144,40 +146,69 @@ retired or compromised.
   `HANDOFF.md`) -- harmless, since the group-mention gate above already
   gets this right without it, but worth knowing if you go looking for it.
 
+## Open rooms
+
+A chat can be plain -- no end-to-end encryption -- rather than the usual
+PGP one. A delivered message carries `encrypted: false` on the wire; this
+adapter passes `message.message` straight through with no decrypt attempt.
+chat-sdk's `MessageMetadata` is a closed shape (`dateSent`/`edited`/
+`editedAt` only), so the normalized `Message`'s `raw` -- its documented
+"platform-specific raw payload (escape hatch)" -- is where the extra facts
+live: `message.raw.encrypted` (`false` for an open room, absent/`true` for
+an ordinary encrypted chat) and `message.raw.delivered_because` (why an
+open-room message was delivered to this identity at all -- see
+**Interests** below; absent until salt-api's open-rooms rollout starts
+sending it on the wire). `postMessage` mirrors this on the way out: a chat
+this adapter has observed as open (from an inbound message, `fetchThread`,
+or a chat's own metadata) gets a plaintext post via `client.postPlainMessage`
+instead of the usual encrypt-for-every-member path -- salt-api refuses a
+PGP post against a plain chat and a plaintext post against an encrypted one
+the same way, so a chat this adapter has never observed defaults to the
+existing encrypted path rather than guessing.
+
+### Interests
+
+By default this identity only hears from an open room the same way it
+would from an encrypted one -- a direct reply or an `@mention`. Set
+`subscriptionMode: "keywords"` (with `subscriptionKeywords`) or `"all"` in
+`SaltAdapterConfig` to hear more: the first time this adapter observes
+itself handling a given plain chat, it calls `client.setChatSubscription`
+with that preference. Has no effect on an ordinary encrypted chat.
+
 ## Socket mode
 
 For a bot with no public URL, pass `mode: "socket"` to `SaltAdapter` instead
-of the default `mode: "webhook"`. It short-polls
-`GET /api/v1/agent/updates` (Salt's socket-mode contract -- an outbox table
-plus an Action Cable channel this adapter's poller doesn't use yet, see
-`design-fleet/runs/2026-09-17-distribution/LANES.md`'s "Socket mode contract
-(K2)"), adaptively paced (about once a second right after activity, backing
-off to about once every five seconds while idle -- `salt-agent-sdk`'s own
-`ACTIVE_POLL_DELAY_MS`/`IDLE_POLL_DELAY_MS`), and feeds each verified,
-non-duplicate row through the exact same signature-verification and
-dispatch path `handleWebhook` uses. The poll cursor and delivery-id dedupe
-set persist across restarts via `salt-agent-sdk`'s `FileCursorStore`/
+of the default `mode: "webhook"`. It holds a live Action Cable websocket
+open to salt-api's `AgentUpdatesChannel` (owner rule, 2026-09-22: "DO NOT
+USE POLLING as a mechanic EVER" -- this used to short-poll
+`GET /api/v1/agent/updates`; it now makes zero requests while idle and
+caught up) and feeds each verified, non-duplicate pushed envelope through
+the exact same signature-verification and dispatch path `handleWebhook`
+uses. The resume cursor and delivery-id dedupe set persist across
+restarts/reconnects via `salt-agent-sdk`'s `FileCursorStore`/
 `FileDedupeStore` (default `~/.salt/agents/<agentId>`; pass `cursorStore`/
 `dedupeStore` in `SaltAdapterConfig` to override, e.g. `MemoryCursorStore()`
-in tests). The poller starts in `initialize()` and stops in `disconnect()`
--- unlike webhook mode, this needs a long-running process, not a stateless
-HTTP handler.
+in tests). The connection starts in `initialize()` and stops in
+`disconnect()` -- unlike webhook mode, this needs a long-running process,
+not a stateless HTTP handler.
 
-`mode: "socket"` needs `salt-agent-sdk >= 0.8.0` (this package already
-depends on `^0.8.0`); construction throws a clear, actionable error naming
+`mode: "socket"` needs `salt-agent-sdk >= 0.10.0` (this package already
+depends on `^0.10.0`); construction throws a clear, actionable error naming
 the required version if an older copy is somehow resolved at runtime.
 
 Deliberately NOT reused from `salt-agent-sdk`: its own `createSocketClient`.
 That client is built around a full `IdentityStore` and a decrypt/session/
 hand-off dispatcher for a native Salt agent process (its `reply()`/`ask()`/
-`approve()` re-encrypt and post directly) -- this adapter already has its
-own translation layer into chat-sdk's `ChatInstance.processMessage`, which
-decrypts lazily per chat-sdk's own contract. Reusing the SDK's dispatcher
-would mean decrypting twice under two different session models, so
-`socket.ts` instead builds a poller directly against the raw endpoint and
-reuses exactly the transport-only pieces that fit: `CursorStore`/
-`DedupeStore` and the adaptive-poll constants. See `socket.ts`'s header
-comment for the full reasoning.
+`approve()` re-encrypt and post directly, and its typed `MessageContext`
+doesn't surface `delivered_because` as of salt-agent-sdk 0.10.0) -- this
+adapter already has its own translation layer into chat-sdk's
+`ChatInstance.processMessage`, which decrypts lazily per chat-sdk's own
+contract. Reusing the SDK's dispatcher would mean decrypting under a second,
+different session model AND losing `delivered_because` on the floor, so
+`socket.ts` instead holds its own Action Cable connection directly and
+reuses exactly the transport-only pieces of `salt-agent-sdk` that fit:
+`CursorStore`/`DedupeStore` and the reconnect/ping-timeout constants. See
+`socket.ts`'s header comment for the full reasoning.
 
 ## Testing
 
@@ -193,6 +224,13 @@ Tests mock the REST layer (a fake `fetch` implementation, see
 decryption via `salt-agent-sdk`'s `openpgp`-backed `crypto.ts` -- so
 "posts encrypt for every member" is verified by actually decrypting the
 ciphertext with each member's own private key, not by mocking crypto away.
+`tests/open-rooms.test.ts` covers plaintext in/out, `raw.encrypted`/
+`raw.delivered_because` exposure, and interests (`setChatSubscription`
+wiring, including that it's applied exactly once per chat and never for an
+encrypted one). `tests/socket.test.ts` drives the real Action Cable frame
+sequence (subscribe/replay/replay_done/reconnect) against a fake
+`WebSocket`, including a direct assertion that nothing is ever fetched
+while the connection is idle and caught up -- no polling.
 
 ## Listing this on chat-sdk.dev
 

@@ -1,7 +1,8 @@
 // The handful of salt-api endpoints salt-agent-sdk's REST client
 // (createSaltClient in client.ts) doesn't cover yet: reactions,
-// delete-for-everyone, and the socket-mode outbox poll (LANES.md's K2
-// contract). Everything else this adapter needs -- posting, chat
+// delete-for-everyone, and the socket-mode outbox backfill page (used only
+// when Action Cable's own replay cap truncates the backlog -- see
+// socket.ts). Everything else this adapter needs -- posting, chat
 // membership, typing, cards, the webhook secret -- goes through
 // salt-agent-sdk's own client (see adapter.ts) rather than being
 // reimplemented here.
@@ -11,12 +12,13 @@
 // helper exactly (same auth header, same error type) so it disappears the
 // moment salt-agent-sdk grows `addReaction`/`removeReaction`/
 // `deleteMessage` -- see HANDOFF.md's "left for salt-agent-sdk" note.
-// (salt-agent-sdk 0.8 DOES now export a socket client of its own,
+// (salt-agent-sdk 0.10 DOES now export a socket client of its own,
 // `createSocketClient` -- but it's built around a full IdentityStore +
 // decrypt/session/reply dispatcher for a native Salt agent process, not a
-// bridge into another framework's own Adapter interface; see socket.ts's
-// header comment for why this adapter builds its own poller on top of the
-// raw endpoint instead of adopting that dispatcher wholesale.)
+// bridge into another framework's own Adapter interface, and its typed
+// MessageContext doesn't surface delivered_because; see socket.ts's header
+// comment for why this adapter holds its own Action Cable connection on
+// top of the raw endpoint instead of adopting that dispatcher wholesale.)
 
 import { SaltApiError, type SaltChat } from "salt-agent-sdk";
 
@@ -117,12 +119,14 @@ export function createSaltExtraRest(options: SaltExtraRestOptions) {
 
     /**
      * GET /api/v1/agent/updates?after=&timeout=&limit= -- the socket-mode
-     * outbox short-poll (LANES.md's K2 contract, round 3/4). `timeout` is
-     * clamped server-side to 0-2s; `after` is OMITTED entirely (never sent
-     * as "0") when the caller has no real cursor yet, so salt-api's own
-     * server-side ack (`users.agent_updates_acked_id`) applies instead of
-     * replaying up to 7 days of retained outbox -- see socket.ts's poller,
-     * the only caller.
+     * outbox endpoint (LANES.md's K2 contract, round 3/4). Used ONLY for
+     * the rare backfill page when Action Cable's own replay cap truncates
+     * the backlog (see socket.ts's header comment) -- not a poll any more.
+     * `timeout` is clamped server-side to 0-2s (backfill always sends 0);
+     * `after` is OMITTED entirely (never sent as "0") when the caller has
+     * no real cursor yet, so salt-api's own server-side ack
+     * (`users.agent_updates_acked_id`) applies instead of replaying up to
+     * 7 days of retained outbox -- see socket.ts's client, the only caller.
      */
     async fetchAgentUpdates(
       apiKey: string,

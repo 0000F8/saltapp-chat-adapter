@@ -1,7 +1,7 @@
 import { generateKeypair, encryptFor, MemoryCursorStore, MemoryDedupeStore } from "salt-agent-sdk";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { SaltAdapter } from "../src/adapter";
-import { createSaltSocketPoller } from "../src/socket";
+import { createSaltSocketClient } from "../src/socket";
 import { getInstalledSaltAgentSdkVersion, isAtLeast, MIN_SOCKET_SDK_VERSION } from "../src/socket";
 import { buildSignedAgentUpdateEnvelope, FakeSaltApi } from "./helpers";
 import type { ActionEvent, ChatInstance, Message } from "chat";
@@ -36,13 +36,69 @@ function createFakeChatInstance() {
   return { chat: chat as unknown as ChatInstance, messages, settle: () => Promise.all(pending) };
 }
 
-/** Polls a real (short) interval until `predicate()` is true or `timeoutMs` elapses -- the socket poller's async chain (fetch -> verify -> decrypt) has no single promise this test can await directly. */
 async function waitFor(predicate: () => boolean, timeoutMs = 3000, intervalMs = 10): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeoutMs) throw new Error("waitFor: timed out");
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
+}
+
+type Listener = (...args: unknown[]) => void;
+
+/** A minimal stand-in for `ws`'s WebSocket -- enough of the surface
+ *  socket.ts actually uses (`on`, `send`, `terminate`, `close`) plus test
+ *  helpers to simulate the server side (`serverOpen`, `serverSend`,
+ *  `serverClose`), so these tests drive the real Action Cable frame
+ *  sequence (subscribe/replay/replay_done/reconnect) with no real network
+ *  connection. */
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = [];
+  url: string;
+  listeners = new Map<string, Listener[]>();
+  sent: string[] = [];
+
+  constructor(url: string, _opts: unknown) {
+    this.url = url;
+    FakeWebSocket.instances.push(this);
+  }
+  on(event: string, listener: Listener): this {
+    const list = this.listeners.get(event) ?? [];
+    list.push(listener);
+    this.listeners.set(event, list);
+    return this;
+  }
+  private emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args);
+  }
+  send(data: string): void {
+    this.sent.push(data);
+  }
+  terminate(): void {
+    this.emit("close");
+  }
+  close(): void {
+    this.emit("close");
+  }
+  serverOpen(): void {
+    this.emit("open");
+  }
+  serverSend(frame: unknown): void {
+    this.emit("message", Buffer.from(JSON.stringify(frame)));
+  }
+  serverClose(): void {
+    this.emit("close");
+  }
+}
+
+function subscribeIdentifier(sent: string[]): { after?: number } | undefined {
+  const cmd = sent.map((s) => JSON.parse(s)).find((f) => f.command === "subscribe");
+  if (!cmd) return undefined;
+  return JSON.parse(cmd.identifier);
+}
+
+async function flush(times = 3): Promise<void> {
+  for (let i = 0; i < times; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe("SaltAdapter construction", () => {
@@ -55,13 +111,13 @@ describe("SaltAdapter construction", () => {
     expect(() => new SaltAdapter({ ...BASE_CONFIG, mode: "carrier-pigeon" as never })).toThrow(/Invalid mode/);
   });
 
-  it('constructs successfully for mode: "socket" now that salt-agent-sdk >= 0.8 is installed', () => {
+  it('constructs successfully for mode: "socket" now that salt-agent-sdk >= 0.10 is installed', () => {
     // socket.ts's assertSocketModeSupported() re-checks the installed
     // salt-agent-sdk's own declared version at construction time; the
     // adapter no longer throws once that's >= MIN_SOCKET_SDK_VERSION
-    // (package.json pins ^0.8.0, and this repo's node_modules is a real
-    // 0.8.0 checkout -- see getInstalledSaltAgentSdkVersion's own test
-    // below). The poller itself only starts on initialize().
+    // (package.json pins ^0.10.0, and this repo's node_modules resolves to
+    // a real 0.10.0 checkout -- see getInstalledSaltAgentSdkVersion's own
+    // test below). The socket connection itself only starts on initialize().
     expect(() => new SaltAdapter({ ...BASE_CONFIG, mode: "socket" })).not.toThrow();
   });
 
@@ -78,6 +134,7 @@ describe("socket.ts version comparison", () => {
     expect(isAtLeast("1.0.0", "0.8.0")).toBe(true);
     expect(isAtLeast("0.7.9", "0.8.0")).toBe(false);
     expect(isAtLeast("0.7.1", "0.8.0")).toBe(false);
+    expect(isAtLeast(MIN_SOCKET_SDK_VERSION, MIN_SOCKET_SDK_VERSION)).toBe(true);
   });
 
   it("reads the real installed salt-agent-sdk's own declared version", () => {
@@ -87,25 +144,20 @@ describe("socket.ts version comparison", () => {
   });
 });
 
-describe("createSaltSocketPoller", () => {
+describe("createSaltSocketClient", () => {
   function fakeLogger() {
     return { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn() };
   }
 
-  it("fetches, verifies, and hands each row's (headers, rawBody) to onEnvelope, then persists the cursor", async () => {
+  it("subscribes with no `after` on a fresh cursor, hands a replayed row's (headers, rawBody) to onEnvelope, and persists the cursor from replay_done -- no HTTP polling", async () => {
+    FakeWebSocket.instances = [];
     const extra = { fetchAgentUpdates: vi.fn() };
-    extra.fetchAgentUpdates.mockResolvedValueOnce({
-      updates: [{ id: 5, delivery_id: "d-5", event: "message", headers: { "X-Salt-Signature": "t=1,v1=x" }, body: "{}", created_at: "now" }],
-      cursor: 5,
-    });
-    extra.fetchAgentUpdates.mockResolvedValue({ updates: [], cursor: 5 }); // subsequent polls, until stop()
-
     const cursorStore = MemoryCursorStore();
     const dedupeStore = MemoryDedupeStore();
     const onEnvelope = vi.fn().mockResolvedValue(undefined);
     const logger = fakeLogger();
 
-    const poller = createSaltSocketPoller({
+    const client = createSaltSocketClient({
       host: "https://fake.saltapp.test",
       apiKey: "key",
       agentId: "agent-1",
@@ -114,79 +166,110 @@ describe("createSaltSocketPoller", () => {
       cursorStore,
       dedupeStore,
       onEnvelope,
+      webSocketImpl: FakeWebSocket as never,
     });
+    client.start();
+    await flush();
 
-    poller.start();
-    await waitFor(() => onEnvelope.mock.calls.length > 0);
-    await poller.stop();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const ws = FakeWebSocket.instances[0]!;
+    expect(ws.url).toBe("wss://fake.saltapp.test/cable");
+    ws.serverOpen();
+    await flush();
+    expect(subscribeIdentifier(ws.sent)?.after).toBeUndefined();
+
+    ws.serverSend({ message: { id: 5, delivery_id: "d-5", event: "message", headers: { "X-Salt-Signature": "t=1,v1=x" }, body: "{}", created_at: "now" } });
+    ws.serverSend({ message: { type: "replay_done", cursor: 5, more: false } });
+    await flush();
 
     expect(onEnvelope).toHaveBeenCalledTimes(1);
     expect(onEnvelope).toHaveBeenCalledWith({ "X-Salt-Signature": "t=1,v1=x" }, "{}");
     expect(await cursorStore.get("agent-1")).toBe(5);
+    expect(extra.fetchAgentUpdates).not.toHaveBeenCalled(); // never polled
+
+    await client.stop();
   });
 
-  it("omits `after` on a fresh cursor and sends the real cursor afterward", async () => {
-    const seenAfters: Array<number | undefined> = [];
-    const extra = {
-      fetchAgentUpdates: vi.fn().mockImplementation(async (_apiKey: string, opts: { after?: number }) => {
-        seenAfters.push(opts.after);
-        if (seenAfters.length === 1) return { updates: [{ id: 1, delivery_id: "d-1", event: "message", headers: {}, body: "{}", created_at: "now" }], cursor: 1 };
-        return { updates: [], cursor: 1 };
-      }),
-    };
+  it("resubscribes with the persisted cursor as `after` instead of replaying from scratch", async () => {
+    FakeWebSocket.instances = [];
+    const cursorStore = MemoryCursorStore();
+    await cursorStore.put("agent-1", 1);
 
-    const poller = createSaltSocketPoller({
+    const client = createSaltSocketClient({
       host: "https://fake.saltapp.test",
       apiKey: "key",
       agentId: "agent-1",
-      extra: extra as never,
+      extra: { fetchAgentUpdates: vi.fn() } as never,
       logger: fakeLogger() as never,
-      cursorStore: MemoryCursorStore(),
+      cursorStore,
       dedupeStore: MemoryDedupeStore(),
       onEnvelope: vi.fn().mockResolvedValue(undefined),
+      webSocketImpl: FakeWebSocket as never,
     });
-
-    poller.start();
-    await waitFor(() => seenAfters.length >= 2);
-    await poller.stop();
-
-    expect(seenAfters[0]).toBeUndefined();
-    expect(seenAfters[1]).toBe(1);
+    client.start();
+    await flush();
+    const ws = FakeWebSocket.instances[0]!;
+    ws.serverOpen();
+    await flush();
+    expect(subscribeIdentifier(ws.sent)?.after).toBe(1);
+    await client.stop();
   });
 
   it("skips a delivery already recorded in the dedupe store", async () => {
-    const extra = { fetchAgentUpdates: vi.fn() };
-    extra.fetchAgentUpdates.mockResolvedValueOnce({
-      updates: [{ id: 1, delivery_id: "dup-1", event: "message", headers: {}, body: "{}", created_at: "now" }],
-      cursor: 1,
-    });
-    extra.fetchAgentUpdates.mockResolvedValue({ updates: [], cursor: 1 });
-
+    FakeWebSocket.instances = [];
     const dedupeStore = MemoryDedupeStore();
     await dedupeStore.add("agent-1", "dup-1"); // already processed, e.g. by a previous run
 
     const onEnvelope = vi.fn().mockResolvedValue(undefined);
-    const poller = createSaltSocketPoller({
+    const client = createSaltSocketClient({
       host: "https://fake.saltapp.test",
       apiKey: "key",
       agentId: "agent-1",
-      extra: extra as never,
+      extra: { fetchAgentUpdates: vi.fn() } as never,
       logger: fakeLogger() as never,
       cursorStore: MemoryCursorStore(),
       dedupeStore,
       onEnvelope,
+      webSocketImpl: FakeWebSocket as never,
     });
-
-    poller.start();
-    await waitFor(() => extra.fetchAgentUpdates.mock.calls.length >= 2);
-    await poller.stop();
+    client.start();
+    await flush();
+    const ws = FakeWebSocket.instances[0]!;
+    ws.serverOpen();
+    await flush();
+    ws.serverSend({ message: { id: 1, delivery_id: "dup-1", event: "message", headers: {}, body: "{}", created_at: "now" } });
+    ws.serverSend({ message: { type: "replay_done", cursor: 1, more: false } });
+    await flush();
 
     expect(onEnvelope).not.toHaveBeenCalled();
+    await client.stop();
   });
 
   it("stop() is idempotent and start() is a no-op while already running", async () => {
-    const extra = { fetchAgentUpdates: vi.fn().mockResolvedValue({ updates: [], cursor: 0 }) };
-    const poller = createSaltSocketPoller({
+    FakeWebSocket.instances = [];
+    const client = createSaltSocketClient({
+      host: "https://fake.saltapp.test",
+      apiKey: "key",
+      agentId: "agent-1",
+      extra: { fetchAgentUpdates: vi.fn() } as never,
+      logger: fakeLogger() as never,
+      cursorStore: MemoryCursorStore(),
+      dedupeStore: MemoryDedupeStore(),
+      onEnvelope: vi.fn().mockResolvedValue(undefined),
+      webSocketImpl: FakeWebSocket as never,
+    });
+    client.start();
+    client.start(); // no-op
+    await flush();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    await client.stop();
+    await client.stop(); // no-op, must not throw
+  });
+
+  it("never fires a single HTTP request while idle and caught up -- no setInterval/sleep-poll mechanic", async () => {
+    FakeWebSocket.instances = [];
+    const extra = { fetchAgentUpdates: vi.fn() };
+    const client = createSaltSocketClient({
       host: "https://fake.saltapp.test",
       apiKey: "key",
       agentId: "agent-1",
@@ -195,13 +278,20 @@ describe("createSaltSocketPoller", () => {
       cursorStore: MemoryCursorStore(),
       dedupeStore: MemoryDedupeStore(),
       onEnvelope: vi.fn().mockResolvedValue(undefined),
+      webSocketImpl: FakeWebSocket as never,
     });
+    client.start();
+    await flush();
+    const ws = FakeWebSocket.instances[0]!;
+    ws.serverOpen();
+    await flush();
+    ws.serverSend({ message: { type: "replay_done", cursor: 0, more: false } });
+    await flush();
 
-    poller.start();
-    poller.start(); // no-op
-    await waitFor(() => extra.fetchAgentUpdates.mock.calls.length > 0);
-    await poller.stop();
-    await poller.stop(); // no-op, must not throw
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(extra.fetchAgentUpdates).not.toHaveBeenCalled();
+
+    await client.stop();
   });
 });
 
@@ -215,7 +305,8 @@ describe("SaltAdapter socket mode end to end", () => {
     humanKeys = await generateKeypair("human-pass");
   });
 
-  it("initialize() starts the poller, which decrypts a queued outbox row into a chat-sdk Message; disconnect() stops it", async () => {
+  it("initialize() holds a live socket that decrypts a pushed envelope into a chat-sdk Message; disconnect() stops it", async () => {
+    FakeWebSocket.instances = [];
     const api = new FakeSaltApi();
     api.webhookSecret = secret;
     api.setChat({
@@ -240,6 +331,7 @@ describe("SaltAdapter socket mode end to end", () => {
       mode: "socket",
       cursorStore: MemoryCursorStore(),
       dedupeStore: MemoryDedupeStore(),
+      webSocketImpl: FakeWebSocket as never,
     });
     const fake = createFakeChatInstance();
 
@@ -256,17 +348,25 @@ describe("SaltAdapter socket mode end to end", () => {
       },
     };
     const envelope = buildSignedAgentUpdateEnvelope(body, { agentId: api.agentId, secret, deliveryId: "delivery-socket-1" });
-    api.queueAgentUpdate({ event: "message", headers: envelope.headers, body: envelope.rawBody, created_at: new Date().toISOString() });
 
     await adapter.initialize(fake.chat);
+    await flush();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.serverOpen();
+    await flush();
+    ws.serverSend({
+      message: { id: 1, delivery_id: envelope.headers["X-Salt-Delivery-Id"], event: "message", headers: envelope.headers, body: envelope.rawBody, created_at: new Date().toISOString() },
+    });
+    ws.serverSend({ message: { type: "replay_done", cursor: 1, more: false } });
+
     await waitFor(() => fake.messages.length > 0);
     await fake.settle();
     await adapter.disconnect();
 
     expect(fake.messages).toHaveLength(1);
     expect(fake.messages[0]!.message.text).toBe("hello over the socket");
-    // The poller's own dedupe advanced past this delivery -- a second
-    // initialize() against the same (now-empty) outbox must not redeliver it.
-    expect(api.agentUpdates).toHaveLength(1);
+    // No poll ever happened against the outbox endpoint.
+    expect(api.agentUpdatesAfterSeen).toHaveLength(0);
   }, 10000);
 });

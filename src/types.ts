@@ -4,6 +4,7 @@
 
 import type { Logger } from "chat";
 import type { CursorStore, DedupeStore, SaltClient } from "salt-agent-sdk";
+import type { WebSocket as WS } from "ws";
 
 /**
  * Salt's own thread identity: a chat is a flat conversation (1:1 or group),
@@ -27,8 +28,18 @@ export interface SaltThreadId {
  */
 export interface SaltRawMessage {
   chat_id: string;
-  message: string; // armored PGP ciphertext, or plaintext for a system event
+  message: string; // armored PGP ciphertext, or plaintext for an open room / a system event
   sender_message?: string;
+  /** Open rooms (salt-api 0.8x): false means `message` is plain text, not
+   *  a PGP blob -- see README.md's "Open rooms" section. Absent (or true)
+   *  is an ordinary end-to-end encrypted chat. */
+  encrypted?: boolean;
+  /** Interests: why this open-room message was delivered to this identity
+   *  (see SaltClient.setChatSubscription's `mode`). Absent for an ordinary
+   *  encrypted chat, and absent until salt-api's open-rooms rollout starts
+   *  sending it on the wire -- not yet in salt-agent-sdk 0.10.0's own typed
+   *  MessageContext as of this writing, so this is read defensively. */
+  delivered_because?: "mention" | "reply" | "keyword" | "all" | string;
   message_id: string;
   seq?: number;
   message_type?: string;
@@ -77,6 +88,10 @@ export interface SaltRawChatMeta {
   coaching_for_chat_id?: string;
   private_lane?: boolean;
   lane_kind?: string;
+  /** Open rooms (salt-api 0.8x): false marks a plain chat with no
+   *  end-to-end encryption. Absent (or true) is an ordinary encrypted
+   *  chat -- see SaltRawMessage.encrypted and README.md's "Open rooms". */
+  encrypted?: boolean;
   [key: string]: unknown;
 }
 
@@ -107,9 +122,9 @@ export type SaltWebhookBody =
 /**
  * How this identity receives webhook deliveries. "webhook" (default) means
  * salt-api POSTs to a public URL synchronously; "socket" is LANES.md's K2
- * contract (long-poll or Action Cable against salt-agent-sdk's socket
- * client), for a bot with no public URL. Socket mode needs salt-agent-sdk
- * >= 0.8 -- see socket.ts.
+ * contract -- a live Action Cable websocket this adapter holds open
+ * itself (never a poll; see socket.ts), for a bot with no public URL.
+ * Socket mode needs salt-agent-sdk >= 0.10.0 -- see socket.ts.
  */
 export type SaltDeliveryMode = "webhook" | "socket";
 
@@ -151,13 +166,34 @@ export interface SaltAdapterConfig {
   /** Override `fetch` (tests only). */
   fetchImpl?: typeof fetch;
   /**
-   * `mode: "socket"` only: where the poll cursor persists across restarts.
-   * Defaults to salt-agent-sdk's `FileCursorStore(~/.salt/agents/<agentId>)`;
-   * pass `MemoryCursorStore()` explicitly to opt out of disk I/O (tests, or
-   * a host that wants no local state). See socket.ts.
+   * `mode: "socket"` only: where the resume cursor persists across
+   * restarts/reconnects. Defaults to salt-agent-sdk's
+   * `FileCursorStore(~/.salt/agents/<agentId>)`; pass `MemoryCursorStore()`
+   * explicitly to opt out of disk I/O (tests, or a host that wants no
+   * local state). See socket.ts.
    */
   cursorStore?: CursorStore;
   /** `mode: "socket"` only: persistent per-agent delivery_id dedupe, same
    *  reasoning as `cursorStore`. Defaults to `FileDedupeStore`. */
   dedupeStore?: DedupeStore;
+  /** `mode: "socket"` only: override the WebSocket implementation
+   *  socket.ts connects with (tests -- drives Action Cable frames without
+   *  a real connection). Defaults to `ws`'s own WebSocket. */
+  webSocketImpl?: typeof WS;
+  /**
+   * Open rooms: this identity's own subscription preference for a plain
+   * chat, applied via `client.setChatSubscription` the first time this
+   * adapter observes it handling that chat -- `"addressed"` (default; only
+   * a direct reply/@mention, the closest analogue to how an encrypted chat
+   * already gates delivery, and the one mode that never calls the
+   * subscription API at all), `"keywords"` (any message containing one of
+   * `subscriptionKeywords`), or `"all"` (every message). No effect on an
+   * ordinary encrypted chat. See README.md's "Interests" section.
+   */
+  subscriptionMode?: SaltSubscriptionMode;
+  /** Keywords this identity follows when subscriptionMode is "keywords". */
+  subscriptionKeywords?: string[];
 }
+
+/** See SaltAdapterConfig.subscriptionMode. */
+export type SaltSubscriptionMode = "addressed" | "keywords" | "all";
