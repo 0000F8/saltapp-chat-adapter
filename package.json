@@ -52,7 +52,7 @@
   "dependencies": {
     "@chat-adapter/shared": "^4.40.0",
     "chat": "^4.40.0",
-    "salt-agent-sdk": "^0.7.1"
+    "salt-agent-sdk": "^0.8.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

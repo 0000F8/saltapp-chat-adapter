@@ -3,7 +3,7 @@
 // Adapter implementation.
 
 import type { Logger } from "chat";
-import type { SaltClient } from "salt-agent-sdk";
+import type { CursorStore, DedupeStore, SaltClient } from "salt-agent-sdk";
 
 /**
  * Salt's own thread identity: a chat is a flat conversation (1:1 or group),
@@ -150,4 +150,14 @@ export interface SaltAdapterConfig {
   logger?: Logger;
   /** Override `fetch` (tests only). */
   fetchImpl?: typeof fetch;
+  /**
+   * `mode: "socket"` only: where the poll cursor persists across restarts.
+   * Defaults to salt-agent-sdk's `FileCursorStore(~/.salt/agents/<agentId>)`;
+   * pass `MemoryCursorStore()` explicitly to opt out of disk I/O (tests, or
+   * a host that wants no local state). See socket.ts.
+   */
+  cursorStore?: CursorStore;
+  /** `mode: "socket"` only: persistent per-agent delivery_id dedupe, same
+   *  reasoning as `cursorStore`. Defaults to `FileDedupeStore`. */
+  dedupeStore?: DedupeStore;
 }

@@ -1,5 +1,46 @@
 # HANDOFF: saltapp-chat-adapter (lane `chat-adapter`)
 
+## 2026-09-22 alignment pass (salt-agent-sdk 0.8, round-4 socket contract)
+
+**Socket mode now actually works.** It previously only implemented the
+version-detection gate (always threw, since salt-agent-sdk 0.8 hadn't
+shipped) -- `initialize()`/`disconnect()` never started or stopped
+anything. Now that 0.8 is installed:
+
+- `src/socket.ts` gained `createSaltSocketPoller`: a real poller against
+  `GET /api/v1/agent/updates`, adaptively paced with salt-agent-sdk's own
+  `ACTIVE_POLL_DELAY_MS`/`IDLE_POLL_DELAY_MS` (~1s active, ~5s idle),
+  cursor/dedupe persisted via `FileCursorStore`/`FileDedupeStore` (default
+  `~/.salt/agents/<agentId>`, overridable via `SaltAdapterConfig.cursorStore`/
+  `dedupeStore`).
+- `src/salt-rest.ts` gained `fetchAgentUpdates` (the raw endpoint call;
+  omits `after` entirely on a fresh cursor per the round-4 contract, rather
+  than sending `after=0`, so salt-api's own server-side ack applies).
+- `src/adapter.ts`'s `handleWebhook` was split into a thin Response wrapper
+  plus a new `processEnvelope` method (signature verify, delivery-id
+  dedupe, JSON parse, dispatch) that BOTH webhook and socket delivery now
+  share -- one dispatch path regardless of mode, per the thin-shells rule.
+  `initialize()` starts the poller when `mode === "socket"`; `disconnect()`
+  stops it.
+- Deliberately NOT adopted: salt-agent-sdk's own `createSocketClient`. It's
+  built around a full `IdentityStore` + decrypt/session/hand-off dispatcher
+  for a native Salt agent process; this adapter already decrypts lazily
+  through chat-sdk's own `ChatInstance.processMessage` contract, and
+  reusing the SDK's dispatcher would mean decrypting twice under two
+  session models. `socket.ts`'s header comment has the full reasoning.
+  Signature verification also stays local (`signature.ts`'s
+  `verifySaltSignature`) -- salt-agent-sdk still has no standalone verifier
+  export, only `createDispatcher`'s Express-shaped one.
+- `salt-agent-sdk` dependency bumped `^0.7.1` -> `^0.8.0`.
+- 48 -> 53 tests passing (new: 4 poller unit tests + 1 socket-mode
+  end-to-end test decrypting a queued outbox row into a real chat-sdk
+  `Message`), `tsc --noEmit` and `tsup` build both clean.
+- Not done here: live UAT against a real salt-api (see "Left undone" below,
+  pre-existing item, still open) and the "five SDK-INTEGRATION-GUESS seams"
+  audit some sibling repos need -- this adapter didn't carry that flag.
+
+---
+
 New repository at `/Users/z1ggy/projects/salt/saltapp-chat-adapter` (git
 initialized, committed locally; no GitHub repo created, nothing published,
 per the lane rules). Not a worktree of an existing repo -- this lane's
@@ -28,7 +69,7 @@ src/
   action-id.ts          -- packs a chat-sdk button's (id, value) into Salt's 40-char action_id
   cards.ts               -- CardElement -> Salt block vocabulary mapping
   salt-rest.ts             -- reactions/delete/getChat (see "Left for salt-agent-sdk" below)
-  socket.ts                 -- mode: "socket" version/capability gate (always throws today)
+  socket.ts                 -- mode: "socket" poller + version gate (see 2026-09-22 update above)
 tests/
   helpers.ts        -- FakeSaltApi (mocks fetch, not SaltClient's ~30 methods)
   thread-id.test.ts, action-id.test.ts, signature.test.ts, cards.test.ts,
@@ -225,6 +266,8 @@ IS verified, per "How to test" above and the manual smoke test.
   channel.
 - **Live UAT** -- see above; not run against a real Salt deployment in
   this session.
-- Socket mode itself is, correctly, not implemented -- it's explicitly
-  another lane's deliverable per this lane's own instructions. `src/socket.ts`
-  is the integration point for whenever that lands.
+- ~~Socket mode itself is, correctly, not implemented...~~ **Implemented
+  2026-09-22** now that salt-agent-sdk 0.8 has shipped -- see the top of
+  this file. It has NOT been run against a real salt-api either (same live-UAT
+  gap as above): tests exercise it end-to-end against `FakeSaltApi`, never
+  a real `GET /api/v1/agent/updates`.

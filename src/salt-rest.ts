@@ -1,16 +1,22 @@
 // The handful of salt-api endpoints salt-agent-sdk's REST client
-// (createSaltClient in client.ts) doesn't cover yet: reactions and
-// delete-for-everyone. Everything else this adapter needs -- posting,
-// chat membership, typing, cards, the webhook secret -- goes through
+// (createSaltClient in client.ts) doesn't cover yet: reactions,
+// delete-for-everyone, and the socket-mode outbox poll (LANES.md's K2
+// contract). Everything else this adapter needs -- posting, chat
+// membership, typing, cards, the webhook secret -- goes through
 // salt-agent-sdk's own client (see adapter.ts) rather than being
 // reimplemented here.
 //
-// This exists only because those two endpoints have no method on
-// SaltClient today. It is written to match createSaltClient's own
-// internal `request` helper exactly (same auth header, same error type) so
-// it disappears the moment salt-agent-sdk grows `addReaction`/
-// `removeReaction`/`deleteMessage` -- see HANDOFF.md's "left for
-// salt-agent-sdk" note.
+// This exists only because those endpoints have no method on SaltClient
+// today. It is written to match createSaltClient's own internal `request`
+// helper exactly (same auth header, same error type) so it disappears the
+// moment salt-agent-sdk grows `addReaction`/`removeReaction`/
+// `deleteMessage` -- see HANDOFF.md's "left for salt-agent-sdk" note.
+// (salt-agent-sdk 0.8 DOES now export a socket client of its own,
+// `createSocketClient` -- but it's built around a full IdentityStore +
+// decrypt/session/reply dispatcher for a native Salt agent process, not a
+// bridge into another framework's own Adapter interface; see socket.ts's
+// header comment for why this adapter builds its own poller on top of the
+// raw endpoint instead of adopting that dispatcher wholesale.)
 
 import { SaltApiError, type SaltChat } from "salt-agent-sdk";
 
@@ -30,13 +36,30 @@ export interface SaltReactionResponse {
   reactions: SaltReactionsSummary[];
 }
 
+/** One row from GET /api/v1/agent/updates -- byte-for-byte what the
+ *  equivalent webhook POST would have carried (headers + body), plus the
+ *  outbox's own bookkeeping fields. */
+export interface SaltAgentUpdateRow {
+  id: number;
+  delivery_id: string;
+  event: string;
+  headers: Record<string, string | undefined>;
+  body: string;
+  created_at: string;
+}
+
+export interface SaltAgentUpdatesResponse {
+  updates: SaltAgentUpdateRow[];
+  cursor: number;
+}
+
 export type SaltExtraRestClient = ReturnType<typeof createSaltExtraRest>;
 
 export function createSaltExtraRest(options: SaltExtraRestOptions) {
   const host = options.host.replace(/\/$/, "");
   const doFetch = options.fetchImpl ?? fetch;
 
-  async function request<T>(method: string, path: string, apiKey: string, body?: unknown): Promise<T> {
+  async function request<T>(method: string, path: string, apiKey: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const url = `${host}${path}`;
     const headers: Record<string, string> = { "api-key": apiKey };
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -44,6 +67,7 @@ export function createSaltExtraRest(options: SaltExtraRestOptions) {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
     });
     if (!res.ok) {
       let parsed: unknown;
@@ -89,6 +113,26 @@ export function createSaltExtraRest(options: SaltExtraRestOptions) {
      */
     async getChat(apiKey: string, chatId: string): Promise<SaltChat> {
       return request("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
+    },
+
+    /**
+     * GET /api/v1/agent/updates?after=&timeout=&limit= -- the socket-mode
+     * outbox short-poll (LANES.md's K2 contract, round 3/4). `timeout` is
+     * clamped server-side to 0-2s; `after` is OMITTED entirely (never sent
+     * as "0") when the caller has no real cursor yet, so salt-api's own
+     * server-side ack (`users.agent_updates_acked_id`) applies instead of
+     * replaying up to 7 days of retained outbox -- see socket.ts's poller,
+     * the only caller.
+     */
+    async fetchAgentUpdates(
+      apiKey: string,
+      opts: { after?: number; timeoutSeconds: number; limit: number; signal?: AbortSignal }
+    ): Promise<SaltAgentUpdatesResponse> {
+      const params = new URLSearchParams();
+      if (opts.after !== undefined && opts.after > 0) params.set("after", String(opts.after));
+      params.set("timeout", String(opts.timeoutSeconds));
+      params.set("limit", String(opts.limit));
+      return request("GET", `/api/v1/agent/updates?${params.toString()}`, apiKey, undefined, opts.signal);
     },
   };
 }

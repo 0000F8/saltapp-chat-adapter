@@ -48,6 +48,15 @@ export interface PostedCard {
   text: string;
 }
 
+export interface FakeAgentUpdateRow {
+  id: number;
+  delivery_id: string;
+  event: string;
+  headers: Record<string, string>;
+  body: string;
+  created_at: string;
+}
+
 export class FakeSaltApi {
   readonly host = "https://fake.saltapp.test";
   readonly chats = new Map<string, FakeChat>();
@@ -55,11 +64,23 @@ export class FakeSaltApi {
   readonly postedCards: PostedCard[] = [];
   readonly typingPings: string[] = [];
   readonly deletedMessageIds: string[] = [];
+  /** Rows GET /api/v1/agent/updates will serve, oldest first -- see queueAgentUpdate. */
+  readonly agentUpdates: FakeAgentUpdateRow[] = [];
+  /** Every `after` value a poller actually sent (or `null` when the param was omitted entirely). */
+  readonly agentUpdatesAfterSeen: Array<number | null> = [];
   webhookSecret: string | undefined;
   agentId = "agent-1";
   private seq = 0;
   private messageCounter = 0;
   private cardCounter = 0;
+  private updateCounter = 0;
+
+  /** Appends one outbox row with an auto-incrementing id, as a socket-mode delivery would arrive. */
+  queueAgentUpdate(row: Omit<FakeAgentUpdateRow, "id"> & { id?: number }): FakeAgentUpdateRow {
+    const full: FakeAgentUpdateRow = { id: ++this.updateCounter, ...row };
+    this.agentUpdates.push(full);
+    return full;
+  }
 
   setChat(chat: FakeChat): void {
     this.chats.set(chat.id, chat);
@@ -90,6 +111,15 @@ export class FakeSaltApi {
 
     if (method === "GET" && u.pathname === "/api/v1/agents/webhook_secret") {
       return json({ agent_id: this.agentId, webhook_secret: this.webhookSecret });
+    }
+
+    if (method === "GET" && u.pathname === "/api/v1/agent/updates") {
+      const afterParam = u.searchParams.get("after");
+      this.agentUpdatesAfterSeen.push(afterParam === null ? null : Number(afterParam));
+      const after = afterParam === null ? 0 : Number(afterParam);
+      const pending = this.agentUpdates.filter((row) => row.id > after);
+      const cursor = pending.length > 0 ? pending[pending.length - 1]!.id : after;
+      return json({ updates: pending, cursor });
     }
 
     const chatMatch = /^\/api\/v1\/chats\/([^/]+)$/.exec(u.pathname);
@@ -185,6 +215,22 @@ export class FakeSaltApi {
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+/** Builds the (headers, rawBody) pair one socket-mode outbox row would carry, signed exactly like a webhook POST -- see buildSignedWebhookRequest, the same recipe against a plain object of headers instead of a live Request. */
+export function buildSignedAgentUpdateEnvelope(
+  body: unknown,
+  opts: { agentId: string; secret: string; deliveryId?: string }
+): { headers: Record<string, string>; rawBody: string } {
+  const rawBody = JSON.stringify(body);
+  const t = Math.floor(Date.now() / 1000);
+  const v1 = createHmac("sha256", opts.secret).update(`${t}.${rawBody}`).digest("hex");
+  const headers: Record<string, string> = {
+    "X-Salt-Agent-Id": opts.agentId,
+    "X-Salt-Signature": `t=${t},v1=${v1}`,
+  };
+  if (opts.deliveryId) headers["X-Salt-Delivery-Id"] = opts.deliveryId;
+  return { headers, rawBody };
 }
 
 /** Builds a minimal fetch-API Request the way salt-api's webhook POST would arrive, with a real HMAC signature. */

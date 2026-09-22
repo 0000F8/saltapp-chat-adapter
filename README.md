@@ -146,15 +146,38 @@ retired or compromised.
 
 ## Socket mode
 
-Salt's socket-mode contract for a bot with no public URL (an outbox table,
-a long-poll `GET /api/v1/agent/updates`, and an Action Cable channel) is
-specified but not yet shipped in `salt-agent-sdk` (see
+For a bot with no public URL, pass `mode: "socket"` to `SaltAdapter` instead
+of the default `mode: "webhook"`. It short-polls
+`GET /api/v1/agent/updates` (Salt's socket-mode contract -- an outbox table
+plus an Action Cable channel this adapter's poller doesn't use yet, see
 `design-fleet/runs/2026-09-17-distribution/LANES.md`'s "Socket mode contract
-(K2)" in the Salt monorepo). Passing `mode: "socket"` to `SaltAdapter` checks
-whether the installed `salt-agent-sdk` exposes a socket client and, if not,
-throws a clear error naming the version you need
-(`mode: "socket" needs salt-agent-sdk >= 0.8.0 ...`). The default,
-`mode: "webhook"`, works today.
+(K2)"), adaptively paced (about once a second right after activity, backing
+off to about once every five seconds while idle -- `salt-agent-sdk`'s own
+`ACTIVE_POLL_DELAY_MS`/`IDLE_POLL_DELAY_MS`), and feeds each verified,
+non-duplicate row through the exact same signature-verification and
+dispatch path `handleWebhook` uses. The poll cursor and delivery-id dedupe
+set persist across restarts via `salt-agent-sdk`'s `FileCursorStore`/
+`FileDedupeStore` (default `~/.salt/agents/<agentId>`; pass `cursorStore`/
+`dedupeStore` in `SaltAdapterConfig` to override, e.g. `MemoryCursorStore()`
+in tests). The poller starts in `initialize()` and stops in `disconnect()`
+-- unlike webhook mode, this needs a long-running process, not a stateless
+HTTP handler.
+
+`mode: "socket"` needs `salt-agent-sdk >= 0.8.0` (this package already
+depends on `^0.8.0`); construction throws a clear, actionable error naming
+the required version if an older copy is somehow resolved at runtime.
+
+Deliberately NOT reused from `salt-agent-sdk`: its own `createSocketClient`.
+That client is built around a full `IdentityStore` and a decrypt/session/
+hand-off dispatcher for a native Salt agent process (its `reply()`/`ask()`/
+`approve()` re-encrypt and post directly) -- this adapter already has its
+own translation layer into chat-sdk's `ChatInstance.processMessage`, which
+decrypts lazily per chat-sdk's own contract. Reusing the SDK's dispatcher
+would mean decrypting twice under two different session models, so
+`socket.ts` instead builds a poller directly against the raw endpoint and
+reuses exactly the transport-only pieces that fit: `CursorStore`/
+`DedupeStore` and the adaptive-poll constants. See `socket.ts`'s header
+comment for the full reasoning.
 
 ## Testing
 

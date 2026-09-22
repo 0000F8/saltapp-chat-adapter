@@ -45,7 +45,7 @@ import {
 import { decodeSaltActionId } from "./action-id";
 import { cardElementToSaltBlocks } from "./cards";
 import { verifySaltSignature } from "./signature";
-import { assertSocketModeSupported } from "./socket";
+import { assertSocketModeSupported, createSaltSocketPoller, type SaltSocketPoller } from "./socket";
 import { createSaltExtraRest, type SaltExtraRestClient } from "./salt-rest";
 import { channelIdFromThreadId, decodeThreadId, encodeThreadId } from "./thread-id";
 import type {
@@ -78,6 +78,17 @@ function jsonResponse(body: Record<string, unknown>, status: number): Response {
   });
 }
 
+/** Case-insensitive lookup into a socket-mode update row's `headers`
+ *  object: it's whatever JSON salt-api stored, and JSON key casing isn't
+ *  guaranteed to survive the way a real HTTP Headers object's is. */
+function lookupHeader(headers: Record<string, string | undefined>, name: string): string | undefined {
+  const target = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === target) return value;
+  }
+  return undefined;
+}
+
 /** Salt's own reaction string (max 16 chars, see Reaction model): an EmojiValue reduces to its normalized `.name`; a plain string passes through unchanged. */
 function emojiToSaltString(emoji: EmojiValue | string): string {
   return typeof emoji === "string" ? emoji : emoji.name;
@@ -106,6 +117,8 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
   /** chatId -> best-effort "is this a 1:1", learned the first time fetchThread() resolves real membership. isDM() answers `false` (unknown) until then. */
   private readonly isDmCache = new Map<string, boolean>();
   private warnedNoVerification = false;
+  private readonly mode: SaltAdapterConfig["mode"];
+  private socketPoller: SaltSocketPoller | undefined;
 
   constructor(config: SaltAdapterConfig) {
     for (const field of ["host", "apiKey", "agentId", "privateKey", "publicKey", "pgpPassphrase"] as const) {
@@ -118,9 +131,9 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
       throw new ValidationError(PLATFORM, `Invalid mode: ${String(mode)}. Expected "webhook" or "socket".`);
     }
     if (mode === "socket") {
-      // Throws today (no sibling-lane socket client shipped yet) -- see socket.ts.
       assertSocketModeSupported();
     }
+    this.mode = mode;
 
     this.config = config;
     this._userName = config.username ?? "bot";
@@ -143,11 +156,27 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
         this._userName = fromChat;
       }
     }
+    if (this.mode === "socket" && !this.socketPoller) {
+      this.socketPoller = createSaltSocketPoller({
+        host: this.config.host,
+        apiKey: this.config.apiKey,
+        agentId: this.config.agentId,
+        extra: this.extra,
+        logger: this.logger,
+        cursorStore: this.config.cursorStore,
+        dedupeStore: this.config.dedupeStore,
+        onEnvelope: (headers, rawBody) =>
+          this.processEnvelope((name) => lookupHeader(headers, name), rawBody).then(() => undefined),
+      });
+      this.socketPoller.start();
+    }
   }
 
   async disconnect(): Promise<void> {
-    // Nothing persistent to tear down in webhook mode. Socket mode would
-    // stop its long-poll/WS loop here once that client exists (socket.ts).
+    if (this.socketPoller) {
+      await this.socketPoller.stop();
+      this.socketPoller = undefined;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -292,7 +321,33 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
 
   async handleWebhook(request: Request, options?: WebhookOptions): Promise<Response> {
     const rawBody = await request.text();
+    const outcome = await this.processEnvelope((name) => request.headers.get(name), rawBody, options);
+    switch (outcome) {
+      case "invalid_signature":
+        return jsonResponse({ error: "invalid signature" }, 401);
+      case "invalid_json":
+        return jsonResponse({ error: "invalid JSON" }, 400);
+      case "accepted":
+        return jsonResponse({ status: "accepted" }, 200);
+    }
+  }
 
+  /**
+   * Verify (webhook: HMAC over the raw body; socket: already verified by
+   * the poller upstream -- see socket.ts's header comment) is NOT this
+   * method's job by delivery mode; SIGNATURE verification is, for both,
+   * since salt-api signs a socket-mode envelope exactly the way it signs a
+   * webhook POST (LANES.md's K2 contract: "SDK clients verify each
+   * envelope with the same HMAC check they apply to webhooks"). This is
+   * the one place both `handleWebhook` (a live POST) and socket.ts's
+   * poller (a fetched outbox row) converge, so dedupe, JSON parsing, and
+   * dispatch happen exactly once regardless of delivery mode.
+   */
+  private async processEnvelope(
+    getHeader: (name: string) => string | null | undefined,
+    rawBody: string,
+    options?: WebhookOptions
+  ): Promise<"accepted" | "invalid_signature" | "invalid_json"> {
     if (this.verifySignatures) {
       let secret: string | undefined;
       try {
@@ -302,13 +357,13 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
       }
       const reason = verifySaltSignature({
         rawBody,
-        signatureHeader: request.headers.get("X-Salt-Signature"),
+        signatureHeader: getHeader("X-Salt-Signature"),
         secret: secret ?? "",
         toleranceSeconds: this.signatureToleranceSeconds,
       });
       if (reason) {
         this.logger.warn(`Salt webhook rejected: ${reason}`);
-        return jsonResponse({ error: "invalid signature" }, 401);
+        return "invalid_signature";
       }
     } else if (!this.warnedNoVerification) {
       this.warnedNoVerification = true;
@@ -319,24 +374,24 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
     try {
       body = JSON.parse(rawBody) as SaltWebhookBody;
     } catch {
-      return jsonResponse({ error: "invalid JSON" }, 400);
+      return "invalid_json";
     }
 
     // Salt's guarantee, not an edge case: a delivery can arrive more than
-    // once (retries, or -- once socket mode exists -- an unacked outbox
-    // row). A missing X-Salt-Delivery-Id is treated as always-new rather
-    // than always-duplicate.
-    const deliveryId = request.headers.get("X-Salt-Delivery-Id");
+    // once (retries, or an unacked/replayed outbox row in socket mode). A
+    // missing X-Salt-Delivery-Id is treated as always-new rather than
+    // always-duplicate.
+    const deliveryId = getHeader("X-Salt-Delivery-Id");
     if (deliveryId) {
       if (this.seenDeliveryIds.has(deliveryId)) {
-        return jsonResponse({ status: "accepted" }, 200);
+        return "accepted";
       }
       this.rememberDelivery(deliveryId);
     }
 
     if (!this.chatInstance) {
-      this.logger.warn("Salt webhook received before initialize(); ignoring.");
-      return jsonResponse({ status: "accepted" }, 200);
+      this.logger.warn("Salt event received before initialize(); ignoring.");
+      return "accepted";
     }
 
     if (isCardInteractionBody(body)) {
@@ -350,7 +405,7 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
     // Salt-specific events with no chat-sdk equivalent. Acknowledged, not
     // dispatched -- see README's "What this adapter does not cover".
 
-    return jsonResponse({ status: "accepted" }, 200);
+    return "accepted";
   }
 
   private dispatchMessage(body: SaltMessageWebhookBody, options?: WebhookOptions): void {

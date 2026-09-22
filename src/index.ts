@@ -28,6 +28,8 @@ export {
 } from "./cards";
 export {
   createSaltExtraRest,
+  type SaltAgentUpdateRow,
+  type SaltAgentUpdatesResponse,
   type SaltExtraRestClient,
   type SaltExtraRestOptions,
   type SaltReactionResponse,
@@ -36,8 +38,10 @@ export {
 export {
   MIN_SOCKET_SDK_VERSION,
   assertSocketModeSupported,
-  detectSaltAgentSdkSocketClient,
+  createSaltSocketPoller,
   getInstalledSaltAgentSdkVersion,
   isAtLeast,
   socketModeUnavailableError,
+  type SaltSocketPoller,
+  type SaltSocketPollerOptions,
 } from "./socket";
