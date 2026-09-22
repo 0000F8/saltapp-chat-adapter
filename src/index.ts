@@ -38,10 +38,10 @@ export {
 export {
   MIN_SOCKET_SDK_VERSION,
   assertSocketModeSupported,
-  createSaltSocketPoller,
+  createSaltSocketClient,
   getInstalledSaltAgentSdkVersion,
   isAtLeast,
   socketModeUnavailableError,
-  type SaltSocketPoller,
-  type SaltSocketPollerOptions,
+  type SaltSocketClient,
+  type SaltSocketClientOptions,
 } from "./socket";

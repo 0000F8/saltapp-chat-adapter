@@ -64,6 +64,8 @@ export class FakeSaltApi {
   readonly postedCards: PostedCard[] = [];
   readonly typingPings: string[] = [];
   readonly deletedMessageIds: string[] = [];
+  /** PUT /api/v1/chats/:id/subscription calls -- open rooms' interests. */
+  readonly subscriptionCalls: Array<{ chatId: string; mode: string; keywords?: string[] }> = [];
   /** Rows GET /api/v1/agent/updates will serve, oldest first -- see queueAgentUpdate. */
   readonly agentUpdates: FakeAgentUpdateRow[] = [];
   /** Every `after` value a poller actually sent (or `null` when the param was omitted entirely). */
@@ -170,6 +172,16 @@ export class FakeSaltApi {
     const typingMatch = /^\/api\/v1\/chats\/([^/]+)\/typing$/.exec(u.pathname);
     if (method === "POST" && typingMatch) {
       this.typingPings.push(typingMatch[1]!);
+      return json({});
+    }
+
+    const subscriptionMatch = /^\/api\/v1\/chats\/([^/]+)\/subscription$/.exec(u.pathname);
+    if (method === "PUT" && subscriptionMatch) {
+      this.subscriptionCalls.push({
+        chatId: subscriptionMatch[1]!,
+        mode: String(body!.mode),
+        keywords: body!.keywords as string[] | undefined,
+      });
       return json({});
     }
 

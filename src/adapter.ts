@@ -45,13 +45,14 @@ import {
 import { decodeSaltActionId } from "./action-id";
 import { cardElementToSaltBlocks } from "./cards";
 import { verifySaltSignature } from "./signature";
-import { assertSocketModeSupported, createSaltSocketPoller, type SaltSocketPoller } from "./socket";
+import { assertSocketModeSupported, createSaltSocketClient, type SaltSocketClient } from "./socket";
 import { createSaltExtraRest, type SaltExtraRestClient } from "./salt-rest";
 import { channelIdFromThreadId, decodeThreadId, encodeThreadId } from "./thread-id";
 import type {
   SaltAdapterConfig,
   SaltCardInteractionWebhookBody,
   SaltMessageWebhookBody,
+  SaltRawChatMeta,
   SaltRawMessage,
   SaltRawSender,
   SaltThreadId,
@@ -116,9 +117,20 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
   private readonly seenDeliveryIds = new Set<string>();
   /** chatId -> best-effort "is this a 1:1", learned the first time fetchThread() resolves real membership. isDM() answers `false` (unknown) until then. */
   private readonly isDmCache = new Map<string, boolean>();
+  /** chatId -> whether it's an open (unencrypted) room, learned from any
+   *  message/chat-meta this adapter has observed for it. Unknown (never
+   *  observed) defaults to encrypted -- the safe assumption, since posting
+   *  plaintext into a real encrypted chat is refused by salt-api anyway,
+   *  but posting ciphertext into an open room silently confuses a member
+   *  reading it as a garbled bubble instead. */
+  private readonly chatEncryptedCache = new Map<string, boolean>();
+  /** chatId -> this identity's open-room subscription has already been
+   *  applied, so a busy room doesn't call setChatSubscription on every
+   *  message. See README.md's "Interests" section. */
+  private readonly subscribedChats = new Set<string>();
   private warnedNoVerification = false;
   private readonly mode: SaltAdapterConfig["mode"];
-  private socketPoller: SaltSocketPoller | undefined;
+  private socketClient: SaltSocketClient | undefined;
 
   constructor(config: SaltAdapterConfig) {
     for (const field of ["host", "apiKey", "agentId", "privateKey", "publicKey", "pgpPassphrase"] as const) {
@@ -156,8 +168,8 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
         this._userName = fromChat;
       }
     }
-    if (this.mode === "socket" && !this.socketPoller) {
-      this.socketPoller = createSaltSocketPoller({
+    if (this.mode === "socket" && !this.socketClient) {
+      this.socketClient = createSaltSocketClient({
         host: this.config.host,
         apiKey: this.config.apiKey,
         agentId: this.config.agentId,
@@ -165,17 +177,18 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
         logger: this.logger,
         cursorStore: this.config.cursorStore,
         dedupeStore: this.config.dedupeStore,
+        webSocketImpl: this.config.webSocketImpl,
         onEnvelope: (headers, rawBody) =>
           this.processEnvelope((name) => lookupHeader(headers, name), rawBody).then(() => undefined),
       });
-      this.socketPoller.start();
+      this.socketClient.start();
     }
   }
 
   async disconnect(): Promise<void> {
-    if (this.socketPoller) {
-      await this.socketPoller.stop();
-      this.socketPoller = undefined;
+    if (this.socketClient) {
+      await this.socketClient.stop();
+      this.socketClient = undefined;
     }
   }
 
@@ -247,6 +260,14 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
       formatted: parseMarkdown(text),
       raw,
       author: this.toAuthor(raw.user),
+      // chat-sdk's MessageMetadata is a closed shape (dateSent/edited/
+      // editedAt only) -- `raw` is its documented "platform-specific raw
+      // payload (escape hatch)", so that's where encrypted/delivered_because
+      // live: `message.raw.encrypted` (false for an open room, absent/true
+      // for an ordinary encrypted chat -- see README.md's "Open rooms") and
+      // `message.raw.delivered_because` (why an open-room message was
+      // delivered to this identity -- see README.md's "Interests"; absent
+      // until salt-api's open-rooms rollout starts sending it on the wire).
       metadata: {
         dateSent: new Date(raw.created_at),
         edited: false,
@@ -277,8 +298,16 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
   }
 
   private async decryptAndNormalize(raw: SaltRawMessage): Promise<Message<SaltRawMessage>> {
+    if (raw.chat_id) this.chatEncryptedCache.set(raw.chat_id, raw.encrypted !== false);
+
     let text = "[Encrypted]";
-    if (typeof raw.message === "string" && PGP_MESSAGE_RE.test(raw.message)) {
+    if (raw.encrypted === false) {
+      // Open rooms: no decrypt attempt at all -- `message` is plain text on
+      // the wire, not a PGP blob. The armor check just below stays a guard
+      // (decides whether to try decrypting an ordinary chat's ciphertext),
+      // never a gate on whether plaintext gets through here.
+      text = typeof raw.message === "string" ? raw.message : text;
+    } else if (typeof raw.message === "string" && PGP_MESSAGE_RE.test(raw.message)) {
       try {
         text = await pgpDecrypt(raw.message, this.config.privateKey, this.config.pgpPassphrase);
       } catch (err) {
@@ -333,15 +362,13 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
   }
 
   /**
-   * Verify (webhook: HMAC over the raw body; socket: already verified by
-   * the poller upstream -- see socket.ts's header comment) is NOT this
-   * method's job by delivery mode; SIGNATURE verification is, for both,
-   * since salt-api signs a socket-mode envelope exactly the way it signs a
+   * SIGNATURE verification happens here for both delivery modes, since
+   * salt-api signs a socket-mode envelope exactly the way it signs a
    * webhook POST (LANES.md's K2 contract: "SDK clients verify each
    * envelope with the same HMAC check they apply to webhooks"). This is
-   * the one place both `handleWebhook` (a live POST) and socket.ts's
-   * poller (a fetched outbox row) converge, so dedupe, JSON parsing, and
-   * dispatch happen exactly once regardless of delivery mode.
+   * the one place both `handleWebhook` (a live POST) and socket.ts's live
+   * Action Cable connection (a pushed envelope) converge, so dedupe, JSON
+   * parsing, and dispatch happen exactly once regardless of delivery mode.
    */
   private async processEnvelope(
     getHeader: (name: string) => string | null | undefined,
@@ -410,6 +437,8 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
 
   private dispatchMessage(body: SaltMessageWebhookBody, options?: WebhookOptions): void {
     const raw = body.message;
+    if (body.chat?.id) this.chatEncryptedCache.set(body.chat.id, body.chat.encrypted !== false);
+    this.applySubscriptionIfNeeded(body.chat);
     if (raw.event_type) return; // system events aren't prompts
     if (sameId(raw.user.id, this.config.agentId)) return; // never react to our own echoed message
     if (!this.chatInstance) return;
@@ -418,6 +447,33 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
     // ChatInstance.processMessage's own doc comment -- call it and return
     // fast, per chat-sdk's own webhook-handling guidance.
     void this.chatInstance.processMessage(this, threadId, () => this.decryptAndNormalize(raw), options);
+  }
+
+  /**
+   * Open rooms: applies this identity's configured interests
+   * (subscriptionMode/subscriptionKeywords) the first time this adapter
+   * observes it handling a given plain chat -- "the moment this adapter
+   * starts being aware of a room" is the closest honest analogue to "on
+   * start" a webhook/event-driven adapter (as opposed to a long-running
+   * process that proactively lists its own chats, which salt-agent-sdk has
+   * no REST call for) can offer. No effect on an encrypted chat, and no
+   * effect when subscriptionMode is unset or "addressed" (the default,
+   * which never needs the subscription API at all). Best-effort: a failure
+   * here never blocks message delivery.
+   */
+  private applySubscriptionIfNeeded(chat: SaltRawChatMeta | undefined): void {
+    if (!chat?.id) return;
+    if (chat.encrypted !== false) return; // not an open room
+    const mode = this.config.subscriptionMode;
+    if (!mode || mode === "addressed") return;
+    if (this.subscribedChats.has(chat.id)) return;
+    this.subscribedChats.add(chat.id);
+    this.client
+      .setChatSubscription(this.config.apiKey, chat.id, { mode, keywords: this.config.subscriptionKeywords })
+      .catch((err) => {
+        this.subscribedChats.delete(chat.id!); // let a later message retry
+        this.logger.error(`Salt setChatSubscription for ${chat.id} failed (continuing; this identity keeps its default delivery): ${(err as Error).message}`);
+      });
   }
 
   private async dispatchCardInteraction(body: SaltCardInteractionWebhookBody, options?: WebhookOptions): Promise<void> {
@@ -492,6 +548,16 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
       return this.toRawMessage(posted, threadId);
     }
     const text = this.renderPostableText(message);
+    // Open rooms: a chat this adapter has observed as plain (encrypted:
+    // false) gets a plaintext post -- client.postPlainMessage, never PGP.
+    // salt-api refuses a PGP post against a plain chat and a plaintext
+    // post against an encrypted one the same way (see README.md's "Open
+    // rooms" section), so an unknown chat (never observed) defaults to the
+    // existing encrypt path rather than guessing plain.
+    if (this.chatEncryptedCache.get(chatId) === false) {
+      const posted = await this.client.postPlainMessage(this.config.apiKey, chatId, text);
+      return this.toRawMessage(posted, threadId);
+    }
     const { message: encryptedMessage, senderMessage } = await this.encryptForChat(chatId, text);
     const posted = await this.client.postMessage(this.config.apiKey, chatId, encryptedMessage, senderMessage);
     return this.toRawMessage(posted, threadId);
@@ -578,6 +644,7 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
     const users = chat.session?.users ?? [];
     const isDM = users.length > 0 && users.length <= 2;
     this.isDmCache.set(chatId, isDM);
+    this.chatEncryptedCache.set(chatId, (chat as { encrypted?: boolean }).encrypted !== false);
     return {
       id: threadId,
       channelId: threadId,
