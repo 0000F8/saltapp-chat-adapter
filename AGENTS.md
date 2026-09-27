@@ -83,6 +83,13 @@ implements the `Adapter<SaltThreadId, SaltRawMessage>` interface from the
   comments and in `HANDOFF.md`, and make the failure mode a clear thrown
   error rather than a silent no-op.
 
+**The chat payload nests everything under `session`.** `GET /api/v1/chats/:id` puts every
+chat-level field — `encrypted`, `name`, everything `chat.as_json` carries — under `session`.
+salt-agent-sdk's own `SaltChat.session` type does not yet declare `name` (only `users` and
+`encrypted`): widen it locally rather than casting the chat's top level, since an `as {…}` cast
+is precisely what hid this bug from the type checker. `tests/helpers.ts`'s `FakeChat.session` is
+the one place to add a new session-nested field for tests; never add one to `FakeChat` itself.
+
 ## Commands
 
 ```bash
