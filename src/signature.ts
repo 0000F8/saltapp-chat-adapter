@@ -36,9 +36,21 @@ export interface VerifySaltSignatureOptions {
   now?: () => number;
 }
 
-/** Returns null when the signature is valid, or a short reason it was rejected. */
-export function verifySaltSignature(options: VerifySaltSignatureOptions): string | null {
-  const { rawBody, signatureHeader, secret } = options;
+/**
+ * Cheap, no-network check of an `X-Salt-Signature` header's SHAPE and
+ * freshness only -- never touches a secret, so a caller can (and must)
+ * run this BEFORE fetching or refreshing the webhook secret. A header
+ * that's missing, malformed, or wildly stale is rejected here for free,
+ * which is what keeps a flood of unauthenticated garbage POSTs from
+ * costing this adapter's Salt credential a single API call. See
+ * adapter.ts's `processEnvelope` for the caller.
+ */
+export function signatureShapeIsPlausible(options: {
+  signatureHeader: string | null | undefined;
+  toleranceSeconds?: number;
+  now?: () => number;
+}): string | null {
+  const { signatureHeader } = options;
   const toleranceSeconds = options.toleranceSeconds ?? 300;
   const now = options.now ?? Date.now;
 
@@ -51,7 +63,21 @@ export function verifySaltSignature(options: VerifySaltSignatureOptions): string
   const age = Math.abs(Math.floor(now() / 1000) - Number(t));
   if (age > toleranceSeconds) return `stale signature (${age}s old)`;
 
+  return null;
+}
+
+/** Returns null when the signature is valid, or a short reason it was rejected. */
+export function verifySaltSignature(options: VerifySaltSignatureOptions): string | null {
+  const { rawBody, signatureHeader, secret } = options;
+  const toleranceSeconds = options.toleranceSeconds ?? 300;
+  const now = options.now ?? Date.now;
+
+  const shapeReason = signatureShapeIsPlausible({ signatureHeader, toleranceSeconds, now });
+  if (shapeReason) return shapeReason;
   if (!secret) return "no signing key for this agent";
+
+  const t = /t=(\d+)/.exec(signatureHeader as string)?.[1] as string;
+  const v1 = /v1=([0-9a-f]+)/.exec(signatureHeader as string)?.[1] as string;
 
   const expected = createHmac("sha256", secret).update(`${t}.${rawBody}`).digest("hex");
 
