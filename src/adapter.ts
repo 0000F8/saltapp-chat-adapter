@@ -641,14 +641,22 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
   async fetchThread(threadId: string): Promise<ThreadInfo> {
     const { chatId } = decodeThreadId(threadId);
     const chat = await this.extra.getChat(this.config.apiKey, chatId);
+    // GET /api/v1/chats/:id nests every chat-level field under `session`
+    // (chats_controller.rb#show: `x_chat['session'] = chat.as_json`; see
+    // public/openapi.json's ChatRead schema) -- `encrypted` and `name`
+    // included. Neither lives at the top level of the response, which
+    // otherwise carries only `messages`/`pinned_messages`. salt-agent-sdk's
+    // own SaltChat.session type doesn't declare `name` yet, hence the one
+    // narrow widening below (encrypted needs none -- it's already typed).
+    const session = chat.session as { name?: unknown } | undefined;
     const users = chat.session?.users ?? [];
     const isDM = users.length > 0 && users.length <= 2;
     this.isDmCache.set(chatId, isDM);
-    this.chatEncryptedCache.set(chatId, (chat as { encrypted?: boolean }).encrypted !== false);
+    this.chatEncryptedCache.set(chatId, chat.session?.encrypted !== false);
     return {
       id: threadId,
       channelId: threadId,
-      channelName: typeof chat.name === "string" ? chat.name : undefined,
+      channelName: typeof session?.name === "string" ? session.name : undefined,
       isDM,
       metadata: { memberCount: users.length },
     };
