@@ -1,6 +1,6 @@
 {
   "name": "saltapp-chat-adapter",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Vercel Chat SDK platform adapter for Salt (saltapp.ai) -- write a bot once with `chat`, run it on Salt as one more platform.",
   "license": "MIT",
   "author": "0x0000F8 <0000F8@proton.me>",
