@@ -44,7 +44,7 @@ import {
 
 import { decodeSaltActionId } from "./action-id";
 import { cardElementToSaltBlocks } from "./cards";
-import { verifySaltSignature } from "./signature";
+import { signatureShapeIsPlausible, verifySaltSignature } from "./signature";
 import { assertSocketModeSupported, createSaltSocketClient, type SaltSocketClient } from "./socket";
 import { createSaltExtraRest, type SaltExtraRestClient } from "./salt-rest";
 import { channelIdFromThreadId, decodeThreadId, encodeThreadId } from "./thread-id";
@@ -63,6 +63,13 @@ const PLATFORM = "salt";
 const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE/;
 const DECRYPTED_CACHE_LIMIT = 500;
 const SEEN_DELIVERY_LIMIT = 2000;
+// Bounds how often an uncached webhook-secret fetch can be ATTEMPTED,
+// whatever its outcome. Without this, a persistently failing fetch (a
+// network blip, or the secret not minted yet) OR a flood of well-formed
+// but forged signatures (Salt's API genuinely returns a secret each
+// time -- it just never validates a forgery) would refetch on every
+// single incoming envelope. See getWebhookSecret()/processEnvelope().
+const SECRET_FETCH_COOLDOWN_MS = 60_000;
 
 function isCardInteractionBody(body: SaltWebhookBody): body is SaltCardInteractionWebhookBody {
   return (body as Record<string, unknown>)?.type === "card_interaction";
@@ -110,6 +117,9 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
   private _userName: string;
   private webhookSecret: string | undefined;
   private webhookSecretPromise: Promise<string | undefined> | null = null;
+  /** Date.now() of the last real getWebhookSecret() network call, win or
+   *  lose -- see SECRET_FETCH_COOLDOWN_MS. */
+  private lastSecretFetchAttemptedAt = 0;
 
   /** message_id -> decrypted plaintext, so a repeat parseMessage() call (a reply preview, a rehydrated queue entry) sees real content instead of "[Encrypted]". Bounded FIFO. */
   private readonly decryptedCache = new Map<string, string>();
@@ -326,7 +336,19 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
 
   private async getWebhookSecret(): Promise<string | undefined> {
     if (this.webhookSecret) return this.webhookSecret;
+    // Bounded: an uncached fetch is ATTEMPTED at most once per
+    // SECRET_FETCH_COOLDOWN_MS, whatever it returns last time -- gated on
+    // the attempt, not on success, because a forged-but-well-formed
+    // signature can make this call "succeed" (Salt genuinely has no
+    // trouble returning a real secret; it just isn't the one that
+    // produced the forged header) while still leaving nothing cached
+    // here (`this.webhookSecret` only gets set by `.then()` below, and a
+    // still-undefined secret would otherwise retry on every request).
+    if (Date.now() - this.lastSecretFetchAttemptedAt < SECRET_FETCH_COOLDOWN_MS) {
+      return this.webhookSecret;
+    }
     if (!this.webhookSecretPromise) {
+      this.lastSecretFetchAttemptedAt = Date.now();
       this.webhookSecretPromise = this.client
         .getWebhookSecret(this.config.apiKey)
         .then((secret) => {
@@ -376,6 +398,25 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
     options?: WebhookOptions
   ): Promise<"accepted" | "invalid_signature" | "invalid_json"> {
     if (this.verifySignatures) {
+      const signatureHeader = getHeader("X-Salt-Signature");
+      // Shape-and-freshness check FIRST, before anything that touches the
+      // network: a missing header, a malformed one, or a wildly stale
+      // timestamp is rejected here for free -- no call to getWebhookSecret()
+      // at all. Previously EVERY verification failure (including these)
+      // triggered an unconditional secret fetch with no cooldown, so a flood
+      // of unauthenticated garbage POSTs to a public webhook URL turned into
+      // a flood of authenticated calls against this agent's own Salt
+      // credential. Only a header that's actually worth checking against a
+      // real secret reaches getWebhookSecret() below.
+      const shapeReason = signatureShapeIsPlausible({
+        signatureHeader,
+        toleranceSeconds: this.signatureToleranceSeconds,
+      });
+      if (shapeReason) {
+        this.logger.warn(`Salt webhook rejected: ${shapeReason}`);
+        return "invalid_signature";
+      }
+
       let secret: string | undefined;
       try {
         secret = await this.getWebhookSecret();
@@ -384,7 +425,7 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
       }
       const reason = verifySaltSignature({
         rawBody,
-        signatureHeader: getHeader("X-Salt-Signature"),
+        signatureHeader,
         secret: secret ?? "",
         toleranceSeconds: this.signatureToleranceSeconds,
       });
