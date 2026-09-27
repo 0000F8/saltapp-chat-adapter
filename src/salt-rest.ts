@@ -106,8 +106,9 @@ export function createSaltExtraRest(options: SaltExtraRestOptions) {
     },
 
     /**
-     * GET /api/v1/chats/:id -- the full chat payload (session.users,
-     * messages[], name, ...). salt-agent-sdk's own client.getChatMembers /
+     * GET /api/v1/chats/:id -- the full chat payload: `session` (users,
+     * name, encrypted, everything chat-level) and the top-level `messages`
+     * array. salt-agent-sdk's own client.getChatMembers /
      * getChatMessages hit this same endpoint and each throw away half of
      * it; fetchThread/fetchMessages and the reaction-state check above
      * want both halves at once.

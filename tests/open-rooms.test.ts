@@ -291,3 +291,81 @@ describe("SaltAdapter interests (open-room subscription)", () => {
     expect(api.subscriptionCalls).toHaveLength(0);
   });
 });
+
+// GET /api/v1/chats/:id (chats_controller.rb#show) nests every chat-level
+// field, `encrypted` included, under `session` -- never at the top level
+// of the response (see public/openapi.json's ChatRead schema). The webhook
+// path above observes a room's open/encrypted status from a flat payload
+// and is well covered; fetchThread's own getChat call (used by chat-sdk's
+// channel resolution, independent of any webhook having arrived yet) had
+// no coverage at all, which is exactly how `(chat as { encrypted?: boolean
+// }).encrypted` -- reading a field that only exists under `session` --
+// went unnoticed: it always compared `undefined === false`.
+describe("SaltAdapter open rooms via fetchThread (REST getChat)", () => {
+  let agentKeys: Awaited<ReturnType<typeof generateKeypair>>;
+  const secret = "fetch-thread-secret";
+
+  beforeAll(async () => {
+    agentKeys = await generateKeypair("fetch-thread-agent-pass");
+  });
+
+  function buildAdapter(api: FakeSaltApi): SaltAdapter {
+    return new SaltAdapter({
+      host: api.host,
+      apiKey: "test-api-key",
+      agentId: api.agentId,
+      privateKey: agentKeys.privateKey,
+      publicKey: agentKeys.publicKey,
+      pgpPassphrase: "fetch-thread-agent-pass",
+      fetchImpl: api.fetchImpl,
+    });
+  }
+
+  it("observing an open room only through fetchThread's getChat still posts a later reply plain", async () => {
+    const api = new FakeSaltApi();
+    api.webhookSecret = secret;
+    api.setChat({ id: "room-1", session: { users: [], encrypted: false }, messages: [] });
+    const adapter = buildAdapter(api);
+    const fake = createFakeChatInstance();
+    await adapter.initialize(fake.chat);
+
+    // No webhook has arrived -- this is the ONLY way the adapter has
+    // learned about the chat, exactly what chat-sdk's own channel
+    // resolution does before any message flows.
+    await adapter.fetchThread(encodeThreadId({ chatId: "room-1" }));
+    await adapter.postMessage(encodeThreadId({ chatId: "room-1" }), "the weather here is sunny");
+
+    expect(api.postedMessages).toHaveLength(1);
+    expect(api.postedMessages[0]!.message).toBe("the weather here is sunny");
+    expect(api.postedMessages[0]!.sender_message).toBeUndefined(); // postPlainMessage sends no sender_message
+  });
+
+  it("observing an ordinary encrypted chat through fetchThread still encrypts a later reply", async () => {
+    const api = new FakeSaltApi();
+    api.webhookSecret = secret;
+    api.setChat({
+      id: "chat-1",
+      session: { users: [{ id: "human-1", username: "dan", display_name: "Dan", account_type: "User", public_key: agentKeys.publicKey }], encrypted: true },
+      messages: [],
+    });
+    const adapter = buildAdapter(api);
+    const fake = createFakeChatInstance();
+    await adapter.initialize(fake.chat);
+
+    await adapter.fetchThread(encodeThreadId({ chatId: "chat-1" }));
+    await adapter.postMessage(encodeThreadId({ chatId: "chat-1" }), "encrypted by default");
+
+    expect(api.postedMessages).toHaveLength(1);
+    expect(api.postedMessages[0]!.message).toMatch(/^-----BEGIN PGP MESSAGE/);
+  });
+
+  it("fetchChannelInfo reads the chat's name from session, not the response's top level", async () => {
+    const api = new FakeSaltApi();
+    api.setChat({ id: "chat-1", session: { users: [], name: "General" }, messages: [] });
+    const adapter = buildAdapter(api);
+
+    const info = await adapter.fetchChannelInfo(encodeThreadId({ chatId: "chat-1" }));
+
+    expect(info.name).toBe("General");
+  });
+});

@@ -30,8 +30,14 @@ export interface FakeMessage {
 
 export interface FakeChat {
   id: string;
-  name?: string | null;
-  session: { users: FakeUser[] };
+  // Real GET /api/v1/chats/:id (chats_controller.rb#show) puts every
+  // chat-level field -- name, encrypted, everything chat.as_json carries --
+  // under `session`; the top level of the response otherwise holds only
+  // `messages`/`pinned_messages`. `name` used to sit here at the top
+  // level, which is the exact fake that hid adapter.ts's `chat.name` bug
+  // (see fetchThread) the same way an `encrypted` fake at the top level
+  // hid the `chatEncryptedCache` bug.
+  session: { users: FakeUser[]; name?: string | null; encrypted?: boolean };
   messages: FakeMessage[];
 }
 
