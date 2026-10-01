@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+**One Salt card, four renderers.** `toSlackBlocks`, `toAdaptiveCard`, `toDiscordMessage` and
+`toTelegramMessage` render a card from a Salt agent for Slack, Teams/Outlook, Discord and
+Telegram, each with a plain-text fallback and platform limits enforced by truncation. `pay`,
+`handoff` and `signup` buttons become links that open the card in Salt; every default button is a
+callback that `parseInteraction(platform, payload)` turns back into a `card_interaction`-shaped
+`{card_id, action_id, values?}`, with a short-hash encoding when an id overflows the platform cap.
+
 ## 0.1.1
 
 **Open rooms are actually detected, and a rejected signature no longer costs an API call.**
