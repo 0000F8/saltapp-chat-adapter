@@ -146,6 +146,56 @@ retired or compromised.
   `HANDOFF.md`) -- harmless, since the group-mention gate above already
   gets this right without it, but worth knowing if you go looking for it.
 
+## Rendering a Salt card on other platforms
+
+Salt agents post interactive cards from a small block vocabulary (section, fields,
+image, divider, actions, input). Four pure functions (no I/O, no SDK clients) render
+the same card for a platform where the person already is:
+
+```ts
+import { toSlackBlocks, toAdaptiveCard, toDiscordMessage, toTelegramMessage, parseInteraction } from "saltapp-chat-adapter";
+
+const r = toTelegramMessage(card, { chatId, messageId }); // card = a Salt card resource: { id, state: { blocks } }
+bot.sendMessage(chat, r.text, { parse_mode: r.parse_mode, reply_markup: r.reply_markup });
+// later, on a tap:
+const tap = parseInteraction("telegram", callbackQuery, { hashed: r.hashedCallbacks });
+// tap = { card_id, action_id, values? }, the shape of Salt's card_interaction
+```
+
+| Function | Returns | Platform |
+|---|---|---|
+| `toSlackBlocks` | `{ blocks }` | Block Kit (use `fallbackText` as `text`) |
+| `toAdaptiveCard` | `{ card }` | Adaptive Card 1.5 (Teams, Outlook) |
+| `toDiscordMessage` | `{ embeds, components, allowed_mentions }` | embeds + button components |
+| `toTelegramMessage` | `{ text, parse_mode, reply_markup }` | HTML text + `inline_keyboard` |
+
+Every result also carries `fallbackText` (plain text), `truncated` (a platform limit
+cut something; cuts end in an ellipsis and never throw) and `hashedCallbacks`.
+
+**A button dispatches on its type, never its label.** Only a default button (no
+`action_type`) becomes a callback button. `pay`, `handoff` and `signup` are carried
+out by Salt itself, and money UI is always Salt's own chrome, so on every other
+platform they are LINK buttons labelled with the button's own label that open
+`https://saltapp.ai/chats/<chat_id>?message=<message_id>` (ids from the card or the
+options argument, falling back to the chat, then to the origin). A `link` button keeps
+its url if it is an https address on a Salt host, otherwise it opens Salt. An image
+block needs an https url (else its alt text is shown); an unknown block type shows
+its text.
+
+**Callback encoding.** A tap carries `salt:<card_id>:<action_id>`. If that exceeds the
+platform's cap (Slack `action_id` 255, Discord `custom_id` 100, Telegram
+`callback_data` 64 bytes) it becomes `salt#<16 chars of sha256>`, and the pair is
+returned in `hashedCallbacks`. Keep that map with the message you sent and pass it to
+`parseInteraction` (as an object or a lookup function); a hashed tap with no map
+parses to `null`. Card ids that are uuids fit Telegram only with an action id of
+about 22 characters or fewer.
+
+**What each platform cannot do.** Input blocks are real text fields on Slack and
+Adaptive Cards (their values come back in `values`); Discord and Telegram cannot put a
+text field on a message, so they show the label only. `restricted_to` is not
+enforceable here: a tap on another platform never reaches Salt, so the bot must check
+who tapped. Discord and Telegram lay buttons out after the text, not between blocks.
+
 ## Open rooms
 
 A chat can be plain -- no end-to-end encryption -- rather than the usual
