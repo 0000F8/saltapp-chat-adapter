@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 -- first registry release
+
+First release on npm (`npm install saltapp-chat-adapter`). Depends on `salt-agent-sdk` `^0.18.0`
+(was `^0.12.2`); no source change was needed for the jump, and typecheck, build and all 93 tests
+pass against the registry copy. The card renderers below ship in this release, followed by the
+0.1.1 fixes.
 
 **One Salt card, four renderers.** `toSlackBlocks`, `toAdaptiveCard`, `toDiscordMessage` and
 `toTelegramMessage` render a card from a Salt agent for Slack, Teams/Outlook, Discord and
@@ -9,7 +14,7 @@ Telegram, each with a plain-text fallback and platform limits enforced by trunca
 callback that `parseInteraction(platform, payload)` turns back into a `card_interaction`-shaped
 `{card_id, action_id, values?}`, with a short-hash encoding when an id overflows the platform cap.
 
-## 0.1.1
+### Open rooms and webhook secret
 
 **Open rooms are actually detected, and a rejected signature no longer costs an API call.**
 `fetchThread` read `encrypted` and `name` from the top level of `GET /api/v1/chats/:id`, but the chat

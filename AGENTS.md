@@ -59,16 +59,12 @@ steps.
   the build back to `tsc -p tsconfig.json` without re-checking this --
   `tsconfig.json`'s `noEmit: true` is deliberate; `tsc` here is
   type-checking only (`npm run typecheck`).
-- `salt-agent-sdk` is a **sibling repo**, not published to the real npm
-  registry. `package.json` must read `"salt-agent-sdk": "^0.7.1"` (or
-  whatever range is current) when committed. For local dev/testing, point
-  it at the sibling checkout instead: `npm install ../salt-agent-sdk`
-  (which rewrites the dependency to `file:../salt-agent-sdk` in
-  `package.json`) -- and **restore the semver range before committing**,
-  same as every other lane touching this package per the workspace's
-  `LANES.md`. If `salt-agent-sdk` changed since your last install here,
-  rebuild it first (`cd ../salt-agent-sdk && npm run build`) -- this
-  package imports its compiled `dist/`, not its TypeScript source.
+- `salt-agent-sdk` is on the npm registry (0.18.0 published 2026-10-14);
+  `package.json` reads `"salt-agent-sdk": "^0.18.0"`. For local dev against
+  an unreleased sibling checkout you can `npm install ../salt-agent-sdk`
+  (rewrites the dependency to `file:../salt-agent-sdk`) -- **restore the
+  semver range before committing**. If `salt-agent-sdk` changed since your
+  last install here, rebuild it first (`cd ../salt-agent-sdk && npm run build`).
 - Tests mock the REST layer at the `fetch` level (`tests/helpers.ts`'s
   `FakeSaltApi`), not by hand-stubbing `SaltClient`'s ~30 methods. Real
   `openpgp`-backed encryption/decryption runs in tests via
