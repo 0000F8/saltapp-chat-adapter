@@ -564,13 +564,7 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
     };
   }
 
-  private async encryptForChat(chatId: string, text: string): Promise<{ message: string; senderMessage: string }> {
-    let members: SaltUser[] = [];
-    try {
-      members = await this.client.getChatMembers(this.config.apiKey, chatId);
-    } catch (err) {
-      this.logger.error(`[chat ${chatId}] fetching members to encrypt failed: ${(err as Error).message}`);
-    }
+  private async encryptForChat(members: SaltUser[], text: string): Promise<{ message: string; senderMessage: string }> {
     const recipientKeys = members.map((m) => m.public_key).filter((k): k is string => typeof k === "string" && k.length > 0);
     const encryptTo = recipientKeys.length > 0 ? recipientKeys : [this.config.publicKey];
     const [message, senderMessage] = await Promise.all([
@@ -578,6 +572,49 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
       pgpEncryptFor(text, [this.config.publicKey]),
     ]);
     return { message, senderMessage };
+  }
+
+  /**
+   * The opt-in send guard: the fingerprint of every key the message was
+   * encrypted to. Empty unless EVERY keyed member carries a fingerprint, so a
+   * missing one never reads as stale.
+   */
+  private sendGuard(members: SaltUser[]): { recipientFingerprints?: Record<string, string>; senderFingerprint?: string } {
+    const keyed = members.filter((m) => m.public_key);
+    if (keyed.length === 0 || !keyed.every((m) => m.public_fingerprint)) return {};
+    const isSelf = (m: SaltUser) => sameId(m.id, this.config.agentId);
+    const guard: { recipientFingerprints: Record<string, string>; senderFingerprint?: string } = {
+      recipientFingerprints: Object.fromEntries(keyed.filter((m) => !isSelf(m)).map((m) => [String(m.id), m.public_fingerprint as string])),
+    };
+    const me = keyed.find(isSelf);
+    if (me) guard.senderFingerprint = me.public_fingerprint;
+    return guard;
+  }
+
+  /** Encrypts for the members read right now and posts; on a 409 `stale_recipient_keys` re-encrypts ONCE to the keys Salt returns. */
+  private async postEncrypted(chatId: string, text: string): Promise<unknown> {
+    let members: SaltUser[] = [];
+    try {
+      members = await this.client.getChatMembers(this.config.apiKey, chatId);
+    } catch (err) {
+      this.logger.error(`[chat ${chatId}] fetching members to encrypt failed: ${(err as Error).message}`);
+    }
+    for (let attempt = 0; ; attempt++) {
+      const { message, senderMessage } = await this.encryptForChat(members, text);
+      try {
+        // The guard fields need salt-agent-sdk >= the key-reset release; an older SDK ignores them.
+        return await this.client.postMessage(this.config.apiKey, chatId, message, senderMessage, undefined, undefined, this.sendGuard(members) as { quiet?: boolean });
+      } catch (err) {
+        const e = err as { status?: number; code?: string; body?: { code?: string; members?: unknown } };
+        const stale = e?.status === 409 && (e.code ?? e.body?.code) === "stale_recipient_keys";
+        if (!stale || attempt > 0) throw err;
+        const fresh = Array.isArray(e.body?.members) ? (e.body.members as SaltUser[]) : [];
+        members = members.map((m) => {
+          const f = fresh.find((x) => sameId(x.id, m.id));
+          return f ? { ...m, public_key: f.public_key ?? m.public_key, public_fingerprint: f.public_fingerprint ?? m.public_fingerprint } : m;
+        });
+      }
+    }
   }
 
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<SaltRawMessage>> {
@@ -599,8 +636,7 @@ export class SaltAdapter implements Adapter<SaltThreadId, SaltRawMessage> {
       const posted = await this.client.postPlainMessage(this.config.apiKey, chatId, text);
       return this.toRawMessage(posted, threadId);
     }
-    const { message: encryptedMessage, senderMessage } = await this.encryptForChat(chatId, text);
-    const posted = await this.client.postMessage(this.config.apiKey, chatId, encryptedMessage, senderMessage);
+    const posted = await this.postEncrypted(chatId, text);
     return this.toRawMessage(posted, threadId);
   }
 

@@ -1,7 +1,7 @@
 import { Actions, Button, Card, CardText } from "chat";
 import type { ChatInstance } from "chat";
 import { decrypt, generateKeypair } from "salt-agent-sdk";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { SaltAdapter } from "../src/adapter";
 import { decodeSaltActionId } from "../src/action-id";
 import { encodeThreadId } from "../src/thread-id";
@@ -75,6 +75,54 @@ describe("SaltAdapter posting", () => {
     expect(posted.sender_message).toBeTruthy();
     const plaintext = await decrypt(posted.sender_message!, agentKeys.privateKey, "agent-pass");
     expect(plaintext).toBe("For my own record");
+  });
+
+  describe("send guard", () => {
+    const stale = (members: unknown[]) => Object.assign(new Error("stale"), { status: 409, code: "stale_recipient_keys", body: { code: "stale_recipient_keys", members } });
+
+    async function guarded(fingerprints: boolean) {
+      adapter = buildAdapter();
+      await adapter.initialize({ getUserName: () => "bot" } as unknown as ChatInstance);
+      const users = api.chats.get("chat-1")!.session.users;
+      if (fingerprints) for (const u of users) (u as { public_fingerprint?: string }).public_fingerprint = `fp-${u.id}`;
+      // The installed SDK predates the guard fields and drops them on the wire, so assert on the call itself.
+      const post = vi.spyOn((adapter as unknown as { client: { postMessage: (...a: unknown[]) => Promise<unknown> } }).client, "postMessage");
+      return post;
+    }
+
+    it("sends every other member's fingerprint and the sender's own", async () => {
+      const post = await guarded(true);
+      await adapter.postMessage(threadId, "hi");
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(post.mock.calls[0]![6]).toEqual({
+        recipientFingerprints: { "human-1": "fp-human-1", "human-2": "fp-human-2" },
+        senderFingerprint: `fp-${api.agentId}`,
+      });
+    });
+
+    it("re-encrypts once to the keys a stale_recipient_keys refusal returns, then resends", async () => {
+      const post = await guarded(true);
+      const rotated = await generateKeypair("rotated-pass");
+      post.mockRejectedValueOnce(stale([{ id: "human-1", public_key: rotated.publicKey, public_fingerprint: "fp-new", key_generation: 2 }]));
+      await adapter.postMessage(threadId, "hi");
+      expect(post).toHaveBeenCalledTimes(2);
+      const [, , message] = post.mock.calls[1]!;
+      expect(await decrypt(message as string, rotated.privateKey, "rotated-pass")).toBe("hi");
+      expect((post.mock.calls[1]![6] as { recipientFingerprints: Record<string, string> }).recipientFingerprints["human-1"]).toBe("fp-new");
+    });
+
+    it("throws a second refusal instead of looping", async () => {
+      const post = await guarded(true);
+      post.mockRejectedValue(stale([]));
+      await expect(adapter.postMessage(threadId, "hi")).rejects.toThrow("stale");
+      expect(post).toHaveBeenCalledTimes(2);
+    });
+
+    it("sends no guard fields when a keyed member lacks a fingerprint", async () => {
+      const post = await guarded(false);
+      await adapter.postMessage(threadId, "hi");
+      expect(post.mock.calls[0]![6]).toEqual({});
+    });
   });
 
   it("posts a CardElement through the cards endpoint instead of the plain message endpoint", async () => {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+**Send guard.** Every encrypted post carries `recipient_fingerprints` and `sender_fingerprint` (members are read at send time). On a 409 `stale_recipient_keys` the post is re-encrypted once to the keys Salt returns and resent; a second refusal is thrown. Needs the salt-agent-sdk release that passes these fields through `postMessage` (0.23.0); an older SDK ignores them.
+
 **One Salt card, four renderers.** `toSlackBlocks`, `toAdaptiveCard`, `toDiscordMessage` and
 `toTelegramMessage` render a card from a Salt agent for Slack, Teams/Outlook, Discord and
 Telegram, each with a plain-text fallback and platform limits enforced by truncation. `pay`,
