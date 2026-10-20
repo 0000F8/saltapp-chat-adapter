@@ -243,7 +243,7 @@ in tests). The connection starts in `initialize()` and stops in
 not a stateless HTTP handler.
 
 `mode: "socket"` needs `salt-agent-sdk >= 0.10.0` (this package already
-depends on `^0.18.0`); construction throws a clear, actionable error naming
+depends on `^0.28.0`); construction throws a clear, actionable error naming
 the required version if an older copy is somehow resolved at runtime.
 
 Deliberately NOT reused from `salt-agent-sdk`: its own `createSocketClient`.
