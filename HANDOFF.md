@@ -271,3 +271,11 @@ IS verified, per "How to test" above and the manual smoke test.
   this file. It has NOT been run against a real salt-api either (same live-UAT
   gap as above): tests exercise it end-to-end against `FakeSaltApi`, never
   a real `GET /api/v1/agent/updates`.
+
+## 2026-10-19: chat-sdk.dev listing PR
+
+- `saltapp-chat-adapter` 0.1.1 is on npm. No earlier PR or issue from 0000F8 on vercel/chat.
+- Opened https://github.com/vercel/chat/pull/1072 from the fork 0000F8/chat (branch `docs/add-salt-community-adapter`): docs page `apps/docs/content/adapters/community/salt.mdx`, catalog entry `packages/catalog/src/adapters/community/salt.ts` (registered in `COMMUNITY_ADAPTERS`), `meta.json` entry, a catalog patch changeset. `readme` is pinned to commit c2f8fe9.
+- The README's "Listing this on chat-sdk.dev" section is out of date. The mechanism is now the `@chat-adapter/catalog` entry plus an MDX page, not `apps/docs/adapters.json`. Left as is so the pinned README stays what the PR reviewed; fix it in the next release and bump the `readme` pin in a follow-up PR.
+- Checks run: catalog build, `docs-adapters.test.ts` (561 passed), biome. The catalog suite's one failure is a missing `zod` from a filtered install, unrelated.
+- The commit carries a DCO `Signed-off-by` as 0x0000F8. The Vercel preview check shows "Authorization required", which a vercel member must grant; nothing for us to do.
