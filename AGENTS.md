@@ -60,7 +60,7 @@ steps.
   `tsconfig.json`'s `noEmit: true` is deliberate; `tsc` here is
   type-checking only (`npm run typecheck`).
 - `salt-agent-sdk` is on the npm registry (0.28.0 published 2026-10-19);
-  `package.json` reads `"salt-agent-sdk": "^0.28.0"`. For local dev against
+  `package.json` reads `"salt-agent-sdk": "^0.29.0"`. For local dev against
   an unreleased sibling checkout you can `npm install ../salt-agent-sdk`
   (rewrites the dependency to `file:../salt-agent-sdk`) -- **restore the
   semver range before committing**. If `salt-agent-sdk` changed since your

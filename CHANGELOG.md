@@ -2,7 +2,7 @@
 
 ## 0.1.1 -- first registry release
 
-First release on npm (`npm install saltapp-chat-adapter`). Depends on `salt-agent-sdk` `^0.28.0`
+First release on npm (`npm install saltapp-chat-adapter`). Depends on `salt-agent-sdk` `^0.29.0`
 (was `^0.12.2`); no source change was needed for the jump, and typecheck, build and all 93 tests
 pass against the registry copy. The card renderers below ship in this release, followed by the
 0.1.1 fixes.
